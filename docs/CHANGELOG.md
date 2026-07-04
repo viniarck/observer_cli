@@ -1,4 +1,9 @@
 # Changelog
+- 1.8.8
+  - Automatically adapt terminal layout width across Home, Application, ETS, Mnesia, Network, Process, Port, System, and less footers.
+  - Reorganize Doc help shortcuts into clearer command groups.
+  - Relax the Elvis god-module rule for existing large renderer modules.
+
 - 1.8.7
   - Handle unchanged case in `net_kernel:set_net_ticktime`.
   - Fix `rebar3 check` by updating the Elvis macro rule name to `macro_naming_convention`.
