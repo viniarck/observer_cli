@@ -187,6 +187,16 @@ render_process_info_registered_test() ->
     ?assert(string:find(lists:flatten(Title), "Meta") =/= nomatch),
     ?assert(string:find(lists:flatten(Rows), "test_reg") =/= nomatch).
 
+render_process_info_wide_layout_test() ->
+    Base = process_info_widths(80),
+    Wide = process_info_widths(180),
+    ?assertEqual([1, 3, 5], unchanged_columns(Base, Wide, [1, 3, 5])),
+    ?assertEqual([2, 4, 6], wider_columns(Base, Wide, [2, 4, 6])).
+
+render_process_info_wide_alignment_test() ->
+    {Title, Rows} = process_info_columns(205),
+    ?assert(lists:all(fun(Row) -> Row =:= Title end, Rows)).
+
 render_link_monitor_test() ->
     Line = observer_cli_process:render_link_monitor([self()], [{process, self()}], [self()]),
     ?assert(string:find(lists:flatten(Line), "Links(") =/= nomatch).
@@ -206,6 +216,23 @@ render_link_monitor_variants_test() ->
         port_close(Port)
     end.
 
+render_link_monitor_wide_layout_test() ->
+    Base = process_link_widths(80),
+    Wide = process_link_widths(180),
+    ?assert(
+        lists:all(
+            fun({BaseLine, WideLine}) ->
+                lists:nth(1, BaseLine) =:= lists:nth(1, WideLine) andalso
+                    lists:nth(2, WideLine) > lists:nth(2, BaseLine)
+            end,
+            lists:zip(Base, Wide)
+        )
+    ).
+
+render_link_monitor_wide_alignment_test() ->
+    [First | Rest] = process_link_widths(205),
+    ?assert(lists:all(fun(Row) -> Row =:= First end, Rest)).
+
 render_reduction_memory_test() ->
     Q = queue:new(),
     {_RedQ, _MemQ, Lines} = observer_cli_process:render_reduction_memory(10, 20, Q, Q),
@@ -215,6 +242,28 @@ render_reduction_memory_queue_trim_test() ->
     Q = lists:foldl(fun(_, Acc) -> queue:in(1, Acc) end, queue:new(), lists:seq(1, 20)),
     {_RedQ, _MemQ, Lines} = observer_cli_process:render_reduction_memory(10, 20, Q, Q),
     ?assert(string:find(lists:flatten(Lines), "Reductions") =/= nomatch).
+
+render_reduction_memory_wide_layout_test() ->
+    Base = reduction_memory_widths(80),
+    Wide = reduction_memory_widths(220),
+    ?assert(lists:nth(1, Wide) > lists:nth(1, Base)),
+    ?assert(lists:nth(2, Wide) > lists:nth(2, Base)),
+    observer_cli_test_io:with_geometry(
+        24,
+        220,
+        [],
+        fun() ->
+            Q = queue:from_list(['NaN', 'NaN', 'NaN']),
+            {_RedQ, _MemQ, Lines} = observer_cli_process:render_reduction_memory(
+                'NaN', 'NaN', Q, Q
+            ),
+            ?assert(string:find(lists:flatten(Lines), "NaN") =/= nomatch)
+        end
+    ).
+
+render_info_page_wide_border_alignment_test() ->
+    {LayoutWidth, LineWidths} = process_info_page_line_widths(205),
+    ?assert(lists:all(fun(Width) -> Width =:= LayoutWidth end, LineWidths)).
 
 render_menu_test() ->
     Line = observer_cli_process:render_menu(info, home, 1500),
@@ -245,7 +294,7 @@ state_title_test() ->
 state_footer_text_test() ->
     Text = observer_cli_process:state_footer_text(#{}),
     ?assertEqual("q(quit)    F/B(page forward/back)", Text),
-    Line = observer_cli_process:render_footer_line(Text, 140),
+    Line = observer_cli_process:state_footer("menu", #{}),
     ?assert(string:find(lists:flatten(Line), "q(quit)") =/= nomatch).
 
 state_footer_test() ->
@@ -409,5 +458,107 @@ deep_stack_level3() ->
     receive
     after infinity -> ok
     end.
+
+process_info_widths(Columns) ->
+    {Title, [FirstRow | _]} = process_info_columns(Columns),
+    {Title, FirstRow}.
+
+process_info_columns(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            [Title, Rows] = observer_cli_process:render_process_info(process_view()),
+            {
+                observer_cli_test_io:column_widths(Title),
+                observer_cli_test_io:line_column_widths(Rows)
+            }
+        end
+    ).
+
+process_link_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            Line = observer_cli_process:render_link_monitor(
+                [self()], [{process, self()}], [self()]
+            ),
+            observer_cli_test_io:line_column_widths(Line)
+        end
+    ).
+
+reduction_memory_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            Q = queue:from_list(['NaN', 'NaN', 'NaN']),
+            {_RedQ, _MemQ, Lines} = observer_cli_process:render_reduction_memory(
+                'NaN', 'NaN', Q, Q
+            ),
+            observer_cli_test_io:line_widths(Lines)
+        end
+    ).
+
+process_info_page_line_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            Q = queue:from_list([nan, nan, nan]),
+            {_RedQ, _MemQ, RedMem} = observer_cli_process:render_reduction_memory(
+                10, 20, Q, Q
+            ),
+            IoData = [
+                observer_cli_process:render_menu(info, home, 1500),
+                observer_cli_process:render_process_info(process_view()),
+                observer_cli_process:render_link_monitor([self()], [{process, self()}], [self()]),
+                RedMem,
+                observer_cli_process:render_last_line()
+            ],
+            {observer_cli_lib:layout_width(), observer_cli_test_io:line_widths(IoData)}
+        end
+    ).
+
+process_view() ->
+    GC = [
+        {min_bin_vheap_size, 1},
+        {min_heap_size, 2},
+        {fullsweep_after, 3},
+        {minor_gcs, 4}
+    ],
+    #{
+        pid => self(),
+        registered_name => test_reg,
+        group_leader => self(),
+        status => running,
+        trap_exit => true,
+        initial_call => {very_long_module_for_layout, very_long_function_for_layout, 1},
+        message_queue_len => 5,
+        heap_size => 10,
+        total_heap_size => 20,
+        garbage_collection => GC
+    }.
+
+unchanged_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, BaseTitle) =:= lists:nth(Pos, WideTitle),
+        lists:nth(Pos, BaseRow) =:= lists:nth(Pos, WideRow)
+    ].
+
+wider_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, WideTitle) > lists:nth(Pos, BaseTitle),
+        lists:nth(Pos, WideRow) > lists:nth(Pos, BaseRow)
+    ].
 
 -endif.

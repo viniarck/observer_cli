@@ -20,7 +20,6 @@
     render_reduction_memory/4,
     render_menu/3,
     render_last_line/0,
-    render_footer_line/2,
     state_footer_text/1,
     render_worker/8,
     render_state/3,
@@ -326,45 +325,48 @@ render_process_info(#{
             true -> ?RED;
             false -> ?GREEN
         end,
+    [MetaW, MetaValueW, MemoryW, MemoryValueW, GcW, GcValueW] =
+        process_info_widths([16, 42, 16, 12, 18, 12]),
 
     [
         ?render([
             ?GRAY_BG,
-            ?W("Meta", 16),
-            ?W("Value", 42),
-            ?W("Memory Used", 16),
-            ?W("Value", 12),
-            ?W("Garbage Collection", 18),
-            ?W("Value", 12)
+            ?W("Meta", MetaW),
+            ?W("Value", MetaValueW),
+            ?W("Memory Used", MemoryW),
+            ?W("Value", MemoryValueW),
+            ?W("Garbage Collection", GcW),
+            ?W("Value", GcValueW)
         ]),
         ?render([
-            ?W("registered_name", 16),
-            ?W(Name, 42),
-            ?W("msg_queue_len", 16),
-            ?W2(MessageQueueLenColor, MessageQueueLenStr, 13),
-            ?W(" min_bin_vheap_size", 19),
-            ?W({byte, MinBinVHeapSize}, 12),
+            ?W("registered_name", MetaW),
+            ?W(Name, MetaValueW),
+            ?W("msg_queue_len", MemoryW),
+            ?W2(MessageQueueLenColor, MessageQueueLenStr, MemoryValueW + 1),
+            " ",
+            ?W("min_bin_vheap_size", GcW),
+            ?W({byte, MinBinVHeapSize}, GcValueW),
             ?NEW_LINE,
-            ?W("initial_call", 16),
-            ?W(InitialCallStr, 42),
-            ?W("heap_size", 16),
-            ?W({byte, HeapSize}, 12),
-            ?W("min_heap_size", 18),
-            ?W({byte, MinHeapSize}, 12),
+            ?W("initial_call", MetaW),
+            ?W(InitialCallStr, MetaValueW),
+            ?W("heap_size", MemoryW),
+            ?W({byte, HeapSize}, MemoryValueW),
+            ?W("min_heap_size", GcW),
+            ?W({byte, MinHeapSize}, GcValueW),
             ?NEW_LINE,
-            ?W("group_leader", 16),
-            ?W(GroupLeaderStr, 42),
-            ?W("total_heap_size", 16),
-            ?W({byte, TotalHeapSize}, 12),
-            ?W("fullsweep_after", 18),
-            ?W(FullSweepAfter, 12),
+            ?W("group_leader", MetaW),
+            ?W(GroupLeaderStr, MetaValueW),
+            ?W("total_heap_size", MemoryW),
+            ?W({byte, TotalHeapSize}, MemoryValueW),
+            ?W("fullsweep_after", GcW),
+            ?W(FullSweepAfter, GcValueW),
             ?NEW_LINE,
-            ?W("status", 16),
-            ?W(Status, 42),
-            ?W("trap_exit", 16),
-            ?W(TrapExit, 12),
-            ?W("minor_gcs", 18),
-            ?W(MinorGcs, 12)
+            ?W("status", MetaW),
+            ?W(Status, MetaValueW),
+            ?W("trap_exit", MemoryW),
+            ?W(TrapExit, MemoryValueW),
+            ?W("minor_gcs", GcW),
+            ?W(MinorGcs, GcValueW)
         ])
     ].
 
@@ -399,16 +401,20 @@ render_link_monitor(Link, Monitors, MonitoredBy) ->
     LinkInfo = "Links(" ++ erlang:integer_to_list(erlang:length(Link)) ++ ")",
     MonitorInfo = "Monitors(" ++ erlang:integer_to_list(erlang:length(Monitors)) ++ ")",
     MonitoredByInfo = "MonitoredBy(" ++ erlang:integer_to_list(erlang:length(MonitoredBy)) ++ ")",
+    LinkValueW = 112 + observer_cli_lib:layout_extra_width() + wide_fill(5),
     ?render([
         ?W(LinkInfo, 16),
-        ?W(LinkStr, 112),
+        ?W(LinkStr, LinkValueW),
         ?NEW_LINE,
         ?W(MonitorInfo, 16),
-        ?W(MonitorsStr, 112),
+        ?W(MonitorsStr, LinkValueW),
         ?NEW_LINE,
         ?W(MonitoredByInfo, 16),
-        ?W(MonitoredByStr, 112)
+        ?W(MonitoredByStr, LinkValueW)
     ]).
+
+process_info_widths(Base) ->
+    fill_last(observer_cli_lib:weighted_widths(Base, [0, 4, 0, 1, 0, 1]), wide_fill(5)).
 
 render_reduction_memory(Reduction, Memory, ReductionQ, MemoryQ) ->
     {NewRed, NewMem} =
@@ -420,14 +426,28 @@ render_reduction_memory(Reduction, Memory, ReductionQ, MemoryQ) ->
             false ->
                 {queue:in(Reduction, ReductionQ), queue:in(Memory, MemoryQ)}
         end,
+    Extra = observer_cli_lib:layout_extra_width(),
+    RedWidth = 120 + Extra + wide_fill(5),
+    MemWidth = 124 + Extra + wide_fill(5),
     View = [
-        io_lib:format("|Reductions: ~120.120s|~n", [get_chart_format(NewRed)]),
-        io_lib:format("|Memory: ~124.124s|~n", [get_chart_format(NewMem)])
+        io_lib:format("|Reductions: ~*.*s|~n", [RedWidth, RedWidth, get_chart_format(NewRed)]),
+        io_lib:format("|Memory: ~*.*s|~n", [MemWidth, MemWidth, get_chart_format(NewMem)])
     ],
     {NewRed, NewMem, View}.
 
+wide_fill(Amount) ->
+    case observer_cli_lib:layout_extra_width() of
+        0 -> 0;
+        _ -> Amount
+    end.
+
+fill_last([Last], Amount) ->
+    [Last + Amount];
+fill_last([Width | Rest], Amount) ->
+    [Width | fill_last(Rest, Amount)].
+
 render_last_line() ->
-    io_lib:format("|\e[7mq(quit) ~124.124s\e[0m|~n", [" "]).
+    observer_cli_lib:render_last_line("q(quit)").
 
 get_chart_format(Queue) ->
     List = queue:to_list(Queue),
@@ -446,7 +466,7 @@ render_menu(Type, Menu, Interval) ->
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
     Title = get_menu_title(Type, Menu),
     UpTime = observer_cli_lib:uptime(),
-    TitleWidth = ?COLUMN + 104 - erlang:length(UpTime),
+    TitleWidth = ?COLUMN + 104 - erlang:length(UpTime) + observer_cli_lib:layout_extra_width(),
     ?render([?W([Title | Text], TitleWidth) | UpTime]).
 
 get_menu_title(Type, Menu) ->
@@ -606,16 +626,10 @@ replace_first_line(Line, NewLine) ->
     end.
 
 state_footer(_Menu, Nav) ->
-    Text = state_footer_text(Nav),
-    render_footer_line(Text, ?COLUMN).
+    observer_cli_lib:render_last_line(state_footer_text(Nav)).
 
 state_footer_text(_Nav) ->
     "q(quit)    F/B(page forward/back)".
-
-render_footer_line(Text, Width) ->
-    InnerWidth = Width - 3,
-    Padding = lists:duplicate(InnerWidth - erlang:length(Text), $\s),
-    ["|", ?GRAY_BG, Text, Padding, " ", ?RESET, "|", "\n"].
 
 truncate_str(Pid, Term) ->
     State = #{

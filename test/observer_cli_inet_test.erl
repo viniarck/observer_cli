@@ -151,6 +151,30 @@ render_io_rows_test() ->
     {Row, _} = observer_cli_inet:render_io_rows({0, 0}),
     ?assert(string:find(lists:flatten(Row), "Byte Input") =/= nomatch).
 
+render_io_rows_wide_layout_test() ->
+    Base = io_row_widths(80),
+    Wide = io_row_widths(180),
+    ?assertEqual([1, 3, 5, 7], unchanged_columns(Base, Wide, [1, 3, 5, 7])),
+    ?assertEqual([2, 4, 6, 8], wider_columns(Base, Wide, [2, 4, 6, 8])).
+
+render_inet_rows_wide_layout_test() ->
+    {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(Listen),
+    {ok, Client} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {active, false}]),
+    {ok, Server} = gen_tcp:accept(Listen),
+    try
+        Base = inet_row_widths(Server, 80),
+        Wide = inet_row_widths(Server, 180),
+        ?assertEqual([1, 8], unchanged_columns(Base, Wide, [1, 8])),
+        ?assertEqual(
+            [2, 3, 4, 5, 6, 7, 9, 10], wider_columns(Base, Wide, [2, 3, 4, 5, 6, 7, 9, 10])
+        )
+    after
+        gen_tcp:close(Client),
+        gen_tcp:close(Server),
+        gen_tcp:close(Listen)
+    end.
+
 start_new_interval_test() ->
     observer_cli_test_io:with_input(
         ["1600\n", "q\n"],
@@ -203,5 +227,48 @@ start_port_view_auto_jump_test() ->
     after
         gen_tcp:close(Listen)
     end.
+
+io_row_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            {Row, _} = observer_cli_inet:render_io_rows({0, 0}),
+            observer_cli_test_io:column_widths(Row)
+        end
+    ).
+
+inet_row_widths(Server, Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            Opts = #inet{type = recv_cnt, cur_page = 1, pages = [{1, 1}]},
+            {_, [Title, Row]} = observer_cli_inet:render_inet_rows([{Server, 1, []}], 1, Opts),
+            {observer_cli_test_io:column_widths(Title), observer_cli_test_io:column_widths(Row)}
+        end
+    ).
+
+unchanged_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, BaseTitle) =:= lists:nth(Pos, WideTitle),
+        lists:nth(Pos, BaseRow) =:= lists:nth(Pos, WideRow)
+    ];
+unchanged_columns(Base, Wide, Columns) ->
+    [Pos || Pos <- Columns, lists:nth(Pos, Base) =:= lists:nth(Pos, Wide)].
+
+wider_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, WideTitle) > lists:nth(Pos, BaseTitle),
+        lists:nth(Pos, WideRow) > lists:nth(Pos, BaseRow)
+    ];
+wider_columns(Base, Wide, Columns) ->
+    [Pos || Pos <- Columns, lists:nth(Pos, Wide) > lists:nth(Pos, Base)].
 
 -endif.

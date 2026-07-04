@@ -8,7 +8,7 @@
 -export([clean/1]).
 
 -ifdef(TEST).
--export([app_status/1, find_group_leader/1, update_app_stats/6]).
+-export([app_status/1, find_group_leader/1, render_app_info/3, update_app_stats/6]).
 -endif.
 
 %% API
@@ -106,37 +106,49 @@ render_app_info(Row, CurPage, {Type, N}) ->
         {_, RedColor},
         {_, MsgQColor}
     ] = lists:keyreplace(Type, 1, InitColor, {Type, ?RED_BG}),
+    [
+        IdTitleW,
+        AppTitleW,
+        ProcessTitleW,
+        MemoryTitleW,
+        ReductionsTitleW,
+        MsgQTitleW,
+        StatusTitleW,
+        VersionTitleW
+    ] =
+        app_title_widths(),
     Title = ?render([
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Id", 3),
+        ?W2(?GRAY_BG, "Id", IdTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "App", 31),
+        ?W2(?GRAY_BG, "App", AppTitleW),
         ?UNDERLINE,
-        ?W2(ProcessColor, "ProcessCount(p)", 20),
+        ?W2(ProcessColor, "ProcessCount(p)", ProcessTitleW),
         ?UNDERLINE,
-        ?W2(MemColor, "Memory(m)", 20),
+        ?W2(MemColor, "Memory(m)", MemoryTitleW),
         ?UNDERLINE,
-        ?W2(RedColor, "Reductions(r)", 17),
+        ?W2(RedColor, "Reductions(r)", ReductionsTitleW),
         ?UNDERLINE,
-        ?W2(MsgQColor, "MsgQ(mq)", 10),
+        ?W2(MsgQColor, "MsgQ(mq)", MsgQTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Status", 12),
+        ?W2(?GRAY_BG, "Status", StatusTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "version", 16)
+        ?W2(?GRAY_BG, "version", VersionTitleW)
     ]),
+    [IdW, AppW, ProcessW, MemoryW, ReductionsW, MsgQW, StatusW, VersionW] = app_row_widths(),
     {_, View} = lists:foldl(
         fun({_, _, Item}, {Pos, Acc}) ->
             [App, C, M, R, Q, S, V] = Item,
             {Pos + 1, [
                 ?render([
-                    ?W(Pos, 2),
-                    ?W(App, 29),
-                    ?W(C, 18),
-                    ?W({byte, M}, 18),
-                    ?W(R, 15),
-                    ?W(Q, 8),
-                    ?W(S, 10),
-                    ?W(V, 15)
+                    ?W(Pos, IdW),
+                    ?W(App, AppW),
+                    ?W(C, ProcessW),
+                    ?W({byte, M}, MemoryW),
+                    ?W(R, ReductionsW),
+                    ?W(Q, MsgQW),
+                    ?W(S, StatusW),
+                    ?W(V, VersionW)
                 ])
                 | Acc
             ]}
@@ -145,6 +157,18 @@ render_app_info(Row, CurPage, {Type, N}) ->
         SortList
     ),
     [Title | lists:reverse(View)].
+
+app_title_widths() ->
+    observer_cli_lib:weighted_widths(
+        [3, 31, 20, 20, 17, 10, 12, 16],
+        [0, 4, 0, 0, 1, 0, 0, 4]
+    ).
+
+app_row_widths() ->
+    observer_cli_lib:weighted_widths(
+        [2, 29, 18, 18, 15, 8, 10, 15],
+        [0, 4, 0, 0, 1, 0, 0, 4]
+    ).
 
 app_info() ->
     Info = application:info(),

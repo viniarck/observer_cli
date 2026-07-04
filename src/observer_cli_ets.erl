@@ -8,7 +8,7 @@
 -export([clean/1]).
 
 -ifdef(TEST).
--export([get_ets_info/2, is_reg/1, unread/0]).
+-export([get_ets_info/2, is_reg/1, render_ets_info/3, unread/0]).
 -endif.
 
 -define(LAST_LINE,
@@ -87,24 +87,36 @@ render_ets_info(Rows, CurPage, Attr) ->
             memory -> {?RED_BG, ?GRAY_BG};
             _ -> {?GRAY_BG, ?RED_BG}
         end,
+    [
+        NameTitleW,
+        SizeTitleW,
+        MemoryTitleW,
+        TypeTitleW,
+        ProtectionTitleW,
+        KeyPosTitleW,
+        WriteReadTitleW,
+        OwnerTitleW
+    ] =
+        ets_title_widths(),
     Title = ?render([
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Table Name", 37),
+        ?W2(?GRAY_BG, "Table Name", NameTitleW),
         ?UNDERLINE,
-        ?W2(SizeColor, "Size", 14),
+        ?W2(SizeColor, "Size", SizeTitleW),
         ?UNDERLINE,
-        ?W2(MemColor, "    Memory    ", 14),
+        ?W2(MemColor, "    Memory    ", MemoryTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Type", 15),
+        ?W2(?GRAY_BG, "Type", TypeTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Protection", 12),
+        ?W2(?GRAY_BG, "Protection", ProtectionTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "KeyPos", 8),
+        ?W2(?GRAY_BG, "KeyPos", KeyPosTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Write/Read", 14),
+        ?W2(?GRAY_BG, "Write/Read", WriteReadTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Owner Pid", 15)
+        ?W2(?GRAY_BG, "Owner Pid", OwnerTitleW)
     ]),
+    [NameW, SizeW, MemoryW, TypeW, ProtectionW, KeyPosW, WriteReadW, OwnerW] = ets_row_widths(),
     RowView = [
         begin
             Name = proplists:get_value(name, Ets),
@@ -117,19 +129,31 @@ render_ets_info(Rows, CurPage, Attr) ->
             Read = observer_cli_lib:to_list(proplists:get_value(read_concurrency, Ets)),
             Owner = proplists:get_value(owner, Ets),
             ?render([
-                ?W(Name, 36),
-                ?W(Size, 12),
-                ?W({byte, Memory * WordSize}, 12),
-                ?W(Type, 13),
-                ?W(Protect, 10),
-                ?W(KeyPos, 6),
-                ?W(Write ++ "/" ++ Read, 12),
-                ?W(Owner, 14)
+                ?W(Name, NameW),
+                ?W(Size, SizeW),
+                ?W({byte, Memory * WordSize}, MemoryW),
+                ?W(Type, TypeW),
+                ?W(Protect, ProtectionW),
+                ?W(KeyPos, KeyPosW),
+                ?W(Write ++ "/" ++ Read, WriteReadW),
+                ?W(Owner, OwnerW)
             ])
         end
      || {_, _, Ets} <- SortEts
     ],
     [Title | RowView].
+
+ets_title_widths() ->
+    observer_cli_lib:weighted_widths(
+        [37, 14, 14, 15, 12, 8, 14, 15],
+        [4, 1, 1, 0, 0, 0, 0, 4]
+    ).
+
+ets_row_widths() ->
+    observer_cli_lib:weighted_widths(
+        [36, 12, 12, 13, 10, 6, 12, 14],
+        [4, 1, 1, 0, 0, 0, 0, 4]
+    ).
 
 get_ets_info(Tab, Attr) ->
     try ets:info(Tab) of

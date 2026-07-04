@@ -127,17 +127,27 @@ render_worker(StorePid, InetOpt, LastTimeRef, Count, LastIO, AutoRow) ->
 
 render_io_rows({LastIn, LastOut}) ->
     {{input, In}, {output, Out}} = erlang:statistics(io),
+    [
+        ByteInputW,
+        InputDeltaW,
+        ByteOutputW,
+        OutputDeltaW,
+        TotalInputW,
+        TotalInW,
+        TotalOutputW,
+        TotalOutW
+    ] = io_widths(),
     {
         ?render([
             ?YELLOW,
-            ?W("Byte Input", 14),
-            ?W({byte, In - LastIn}, 12),
-            ?W("Byte Output", 13),
-            ?W({byte, Out - LastOut}, 12),
-            ?W("Total Input", 15),
-            ?W({byte, In}, 17),
-            ?W("Total Output", 15),
-            ?W({byte, Out}, 17)
+            ?W("Byte Input", ByteInputW),
+            ?W({byte, In - LastIn}, InputDeltaW),
+            ?W("Byte Output", ByteOutputW),
+            ?W({byte, Out - LastOut}, OutputDeltaW),
+            ?W("Total Input", TotalInputW),
+            ?W({byte, In}, TotalInW),
+            ?W("Total Output", TotalOutputW),
+            ?W({byte, Out}, TotalOutW)
         ]),
         {In, Out}
     }.
@@ -160,6 +170,8 @@ render_inet_rows(InetList, Num, #inet{
 }) when Type =:= cnt orelse Type =:= oct ->
     {Unit, RecvType, SendType} = trans_type(Type),
     Title = title(Type, RecvType, SendType),
+    [NoW, PortW, ValueW, RecvW, SendW, OutputW, InputW, QueueW, MemoryW, PeerW] =
+        inet_widths(),
     {Start, ChoosePos} = observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(InetList)),
     FormatFunc = fun(Item, {Acc, Acc1, Pos}) ->
         {Port, Value, [{_, Recv}, {_, Send}]} = Item,
@@ -170,18 +182,20 @@ render_inet_rows(InetList, Num, #inet{
         QueueSize = proplists:get_value(queue_size, MemoryUsed),
         Memory = proplists:get_value(memory, MemoryUsed),
         IP = get_remote_ip(Port),
-        {ValueFormat, RecvFormat, SendFormat} = trans_format(Unit, Value, Recv, Send),
+        {ValueFormat, RecvFormat, SendFormat} = trans_format(
+            Unit, Value, Recv, Send, [ValueW, RecvW, SendW]
+        ),
         R = [
-            ?W(Pos, 2),
-            ?W(Port, 16),
+            ?W(Pos, NoW),
+            ?W(Port, PortW),
             ValueFormat,
             RecvFormat,
             SendFormat,
-            ?W({byte, Output}, 12),
-            ?W({byte, Input}, 12),
-            ?W(QueueSize, 6),
-            ?W({byte, Memory}, 12),
-            ?W(IP, 19)
+            ?W({byte, Output}, OutputW),
+            ?W({byte, Input}, InputW),
+            ?W(QueueSize, QueueW),
+            ?W({byte, Memory}, MemoryW),
+            ?W(IP, PeerW)
         ],
         Rows = add_choose_color(ChoosePos, Pos, R),
         {[?render(Rows) | Acc], [{Pos, Port} | Acc1], Pos + 1}
@@ -195,6 +209,8 @@ render_inet_rows(InetList, Num, #inet{
 render_inet_rows(InetList, Num, #inet{type = Type, pages = Pages, cur_page = Page}) ->
     {Unit, Type1, Type2} = trans_type(Type),
     Title = title(Type, Type1, Type2),
+    [NoW, PortW, ValueW, Type1W, Type2W, OutputW, InputW, QueueW, MemoryW, PeerW] =
+        inet_widths(),
     {Start, ChoosePos} = observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(InetList)),
     FormatFunc = fun(Item, {Acc, Acc1, Pos}) ->
         {Port, Value, _} = Item,
@@ -211,18 +227,20 @@ render_inet_rows(InetList, Num, #inet{type = Type, pages = Pages, cur_page = Pag
                 true -> Value + Packet1;
                 false -> Value
             end,
-        {ValueFormat, Packet1Format, AllFormat} = trans_format(Unit, Value, Packet1, AllPacket),
+        {ValueFormat, Packet1Format, AllFormat} = trans_format(
+            Unit, Value, Packet1, AllPacket, [ValueW, Type1W, Type2W]
+        ),
         R = [
-            ?W(Pos, 2),
-            ?W(Port, 16),
+            ?W(Pos, NoW),
+            ?W(Port, PortW),
             ValueFormat,
             Packet1Format,
             AllFormat,
-            ?W({byte, Input}, 12),
-            ?W({byte, Output}, 12),
-            ?W(QueueSize, 6),
-            ?W({byte, Memory}, 12),
-            ?W(IP, 19)
+            ?W({byte, Input}, OutputW),
+            ?W({byte, Output}, InputW),
+            ?W(QueueSize, QueueW),
+            ?W({byte, Memory}, MemoryW),
+            ?W(IP, PeerW)
         ],
         Rows = add_choose_color(ChoosePos, Pos, R),
         {[?render(Rows) | Acc], [{Pos, Port} | Acc1], Pos + 1}
@@ -276,6 +294,7 @@ trans_type(send_oct) ->
 trans_type(recv_oct) ->
     {byte, "send_oct", "oct"}.
 
+-ifdef(TEST).
 trans_format(byte, Val, Val1, Val2) ->
     {
         ?W({byte, Val}, 10),
@@ -288,22 +307,50 @@ trans_format(number, Val, Val1, Val2) ->
         ?W(Val1, 10),
         ?W(Val2, 10)
     }.
+-endif.
+
+trans_format(byte, Val, Val1, Val2, [ValW, Val1W, Val2W]) ->
+    {
+        ?W({byte, Val}, ValW),
+        ?W({byte, Val1}, Val1W),
+        ?W({byte, Val2}, Val2W)
+    };
+trans_format(number, Val, Val1, Val2, [ValW, Val1W, Val2W]) ->
+    {
+        ?W(Val, ValW),
+        ?W(Val1, Val1W),
+        ?W(Val2, Val2W)
+    }.
 
 title(Type, Type1, Type2) ->
+    [NoW, PortW, TypeW, Type1W, Type2W, OutputW, InputW, QueueW, MemoryW, PeerW] =
+        inet_widths(),
     ?render([
         ?UNDERLINE,
         ?GRAY_BG,
-        ?W("NO", 2),
-        ?W("Port", 16),
-        ?W(erlang:atom_to_list(Type), 10),
-        ?W(Type1, 10),
-        ?W(Type2, 10),
-        ?W("output", 12),
-        ?W("input", 12),
-        ?W("queuesize", 6),
-        ?W("memory", 12),
-        ?W("Peername(ip:port)", 19)
+        ?W("NO", NoW),
+        ?W("Port", PortW),
+        ?W(erlang:atom_to_list(Type), TypeW),
+        ?W(Type1, Type1W),
+        ?W(Type2, Type2W),
+        ?W("output", OutputW),
+        ?W("input", InputW),
+        ?W("queuesize", QueueW),
+        ?W("memory", MemoryW),
+        ?W("Peername(ip:port)", PeerW)
     ]).
+
+io_widths() ->
+    observer_cli_lib:weighted_widths(
+        [14, 12, 13, 12, 15, 17, 15, 17],
+        [0, 1, 0, 1, 0, 1, 0, 1]
+    ).
+
+inet_widths() ->
+    observer_cli_lib:weighted_widths(
+        [2, 16, 10, 10, 10, 12, 12, 6, 12, 19],
+        [0, 3, 3, 3, 3, 1, 1, 0, 1, 4]
+    ).
 
 get_remote_ip(P) ->
     case inet:peername(P) of

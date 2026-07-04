@@ -48,4 +48,43 @@ unread_test() ->
     {_, _, Info} = observer_cli_ets:unread(),
     ?assertEqual(unread, proplists:get_value(name, Info)).
 
+render_ets_info_wide_layout_test() ->
+    TabName = wide_layout_ets_table,
+    ets:new(TabName, [named_table, public, set]),
+    try
+        Base = ets_row_widths(80),
+        Wide = ets_row_widths(180),
+        ?assertEqual([4, 5, 6, 7], unchanged_columns(Base, Wide, [4, 5, 6, 7])),
+        ?assertEqual([1, 2, 3, 8], wider_columns(Base, Wide, [1, 2, 3, 8]))
+    after
+        ets:delete(TabName)
+    end.
+
+ets_row_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            [Title, Row | _] = observer_cli_ets:render_ets_info(20, 1, size),
+            {observer_cli_test_io:column_widths(Title), observer_cli_test_io:column_widths(Row)}
+        end
+    ).
+
+unchanged_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, BaseTitle) =:= lists:nth(Pos, WideTitle),
+        lists:nth(Pos, BaseRow) =:= lists:nth(Pos, WideRow)
+    ].
+
+wider_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, WideTitle) > lists:nth(Pos, BaseTitle),
+        lists:nth(Pos, WideRow) > lists:nth(Pos, BaseRow)
+    ].
+
 -endif.

@@ -114,17 +114,12 @@ handle_page({_LessServer, Header, Nav, Footer}, Page) ->
 render_last_line(Nav) ->
     PrevKey =
         case maps:is_key("B\n", Nav) of
-            true -> <<"k(previous page)">>;
-            false -> <<"B/k(previous page)">>
+            true -> "k(previous page)";
+            false -> "B/k(previous page)"
         end,
-    unicode:characters_to_binary([
-        <<"|">>,
-        ?GRAY_BG,
-        <<"q(quit) F/j(next page) ">>,
-        PrevKey,
-        ?RESET,
-        <<"\n">>
-    ]).
+    unicode:characters_to_binary(
+        observer_cli_lib:render_last_line(["q(quit) F/j(next page) ", PrevKey])
+    ).
 
 header_lines(undefined) -> 0;
 header_lines(_Header) -> 1.
