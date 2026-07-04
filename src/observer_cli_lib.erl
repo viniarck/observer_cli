@@ -17,10 +17,14 @@
 -export([next_redraw/2]).
 -export([flush_redraw_timer/1]).
 -export([render_menu/2]).
+-export([layout_width/0]).
+-export([layout_extra_width/0]).
+-export([weighted_widths/2]).
 -export([get_terminal_rows/1]).
 -export([select/1]).
 -export([unselect/1]).
 -export([parse_integer/1]).
+-export([pad_rendered/1]).
 -export([render_last_line/1]).
 -export([exit_processes/1]).
 -export([update_page_pos/3]).
@@ -31,6 +35,7 @@
 
 -ifdef(TEST).
 -export([parse_cmd_str/1]).
+-export([visible_length/1]).
 -endif.
 
 -spec uptime() -> list().
@@ -116,7 +121,7 @@ mfa_to_list(Function) ->
 -spec render(list()) -> iolist().
 render(FA) ->
     {F, A} = tidy_format_args([" \e[0m|~n" | lists:reverse(["|" | FA])], true, [], []),
-    io_lib:format(erlang:iolist_to_binary(F), A).
+    pad_rendered(io_lib:format(erlang:iolist_to_binary(F), A)).
 
 %{erlang:iolist_to_binary(F), A}.
 
@@ -129,7 +134,7 @@ render_menu(Type, Text) ->
         end,
     Title = get_menu_title(Type, MnesiaTitle),
     UpTime = uptime(),
-    TitleWidth = ?COLUMN + 151 - erlang:length(UpTime),
+    TitleWidth = ?COLUMN + 151 - erlang:length(UpTime) + layout_extra_width(),
     ?render([?W([Title | Text], TitleWidth) | UpTime]).
 
 tidy_format_args([], _NeedLine, FAcc, AAcc) ->
@@ -315,6 +320,108 @@ flush_redraw_timer(LastTimeRef) ->
     LastTimeRef =/= ?INIT_TIME_REF andalso erlang:cancel_timer(LastTimeRef),
     ok.
 
+-spec layout_width() -> pos_integer().
+layout_width() ->
+    case io:columns() of
+        {ok, Columns} when is_integer(Columns), Columns > ?COLUMN + 5 ->
+            Columns - 1;
+        {ok, Columns} when is_integer(Columns) ->
+            erlang:max(?COLUMN + 5, Columns);
+        _ ->
+            ?COLUMN + 5
+    end.
+
+-spec layout_extra_width() -> non_neg_integer().
+layout_extra_width() ->
+    layout_width() - (?COLUMN + 5).
+
+-spec weighted_widths([non_neg_integer()], [non_neg_integer()]) -> [non_neg_integer()].
+weighted_widths(BaseWidths, Weights) when length(BaseWidths) =:= length(Weights) ->
+    Extras = weighted_extras(layout_extra_width(), Weights),
+    [Width + Extra || {Width, Extra} <- lists:zip(BaseWidths, Extras)].
+
+weighted_extras(_Extra, []) ->
+    [];
+weighted_extras(Extra, Weights) ->
+    case lists:sum(Weights) of
+        0 ->
+            [0 || _ <- Weights];
+        Total ->
+            Base = [(Extra * Weight) div Total || Weight <- Weights],
+            add_extra_remainder(Base, Weights, Extra - lists:sum(Base))
+    end.
+
+add_extra_remainder(Widths, _Weights, 0) ->
+    Widths;
+add_extra_remainder([], [], _Rem) ->
+    [];
+add_extra_remainder([Width | Widths], [0 | Weights], Rem) ->
+    [Width | add_extra_remainder(Widths, Weights, Rem)];
+add_extra_remainder([Width | Widths], [_Weight | Weights], Rem) ->
+    [Width + 1 | add_extra_remainder(Widths, Weights, Rem - 1)].
+
+-spec pad_rendered(iodata()) -> list().
+pad_rendered(IoData) ->
+    Lines = binary:split(unicode:characters_to_binary(IoData), <<"\n">>, [global]),
+    unicode:characters_to_list(iolist_to_binary(join_lines([pad_line(Line) || Line <- Lines]))).
+
+join_lines([]) ->
+    <<>>;
+join_lines([Line]) ->
+    Line;
+join_lines([Line | Rest]) ->
+    [Line, <<"\n">> | join_lines(Rest)].
+
+pad_line(<<>>) ->
+    <<>>;
+pad_line(Line) ->
+    NormalizedLine = trim_border_space(Line),
+    case border_parts(NormalizedLine) of
+        {Body, Suffix} -> pad_bordered_line(NormalizedLine, Body, Suffix);
+        false -> NormalizedLine
+    end.
+
+trim_border_space(Line) ->
+    Reset = ?RESET,
+    Suffix = <<$|, $\s, Reset/binary>>,
+    case take_suffix(Line, Suffix) of
+        {Body, _} -> <<Body/binary, $|, Reset/binary>>;
+        false -> Line
+    end.
+
+border_parts(Line) ->
+    Reset = ?RESET,
+    ResetSuffix = <<$|, Reset/binary>>,
+    case take_suffix(Line, <<"|">>) of
+        {Body, Suffix} ->
+            {Body, Suffix};
+        false ->
+            take_suffix(Line, ResetSuffix)
+    end.
+
+take_suffix(Line, Suffix) when byte_size(Line) >= byte_size(Suffix) ->
+    BodySize = byte_size(Line) - byte_size(Suffix),
+    case Line of
+        <<Body:BodySize/binary, Suffix/binary>> -> {Body, Suffix};
+        _ -> false
+    end;
+take_suffix(_Line, _Suffix) ->
+    false.
+
+pad_bordered_line(Line, Body, Suffix) ->
+    case layout_width() - visible_length(Line) of
+        Padding when Padding > 0 ->
+            [Body, lists:duplicate(Padding, $\s), Suffix];
+        _ ->
+            Line
+    end.
+
+visible_length(IoData) ->
+    Bin = unicode:characters_to_binary(IoData),
+    Clean0 = re:replace(Bin, <<"\e\\[[0-9;]*[A-Za-z]">>, <<>>, [global, {return, binary}]),
+    Clean = binary:replace(Clean0, [<<"\n">>, <<"\r">>], <<>>, [global]),
+    length(unicode:characters_to_list(Clean)).
+
 -spec get_terminal_rows(boolean()) -> integer().
 get_terminal_rows(_AutoRow = false) ->
     application:get_env(observer_cli, default_row_size, 30);
@@ -340,9 +447,9 @@ parse_integer(Number) ->
             end
     end.
 
--spec render_last_line(string()) -> list().
+-spec render_last_line(iodata()) -> list().
 render_last_line(Text) ->
-    ?render([?UNDERLINE, ?GRAY_BG, ?W(Text, ?COLUMN + 2)]).
+    ?render([?UNDERLINE, ?GRAY_BG, ?W(Text, layout_width() - 3)]).
 
 -spec exit_processes(list()) -> ok.
 exit_processes(List) ->

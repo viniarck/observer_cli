@@ -112,17 +112,18 @@ get_dist_nodes_info() ->
 render_dist_node_info([]) ->
     [];
 render_dist_node_info(DistNodesInfo) ->
+    [NodeW, QueueW, PercentW, AddressW, InW, OutW, TypeW, StateW] = dist_node_widths(),
     Title = ?render([
         ?UNDERLINE,
         ?GRAY_BG,
-        ?W("Node", 30),
-        ?W("Dist Node Queue Size Bytes", 20),
-        ?W("Percent", 7),
-        ?W("Address", 19),
-        ?W("In", 11),
-        ?W("Out", 11),
-        ?W("Type", 7),
-        ?W("State", 10)
+        ?W("Node", NodeW),
+        ?W("Dist Node Queue Size Bytes", QueueW),
+        ?W("Percent", PercentW),
+        ?W("Address", AddressW),
+        ?W("In", InW),
+        ?W("Out", OutW),
+        ?W("Type", TypeW),
+        ?W("State", StateW)
     ]),
     Limit = erlang:system_info(dist_buf_busy_limit),
     LimitStr = integer_to_list(Limit),
@@ -145,19 +146,25 @@ render_dist_node_info(DistNodesInfo) ->
                         "unsupported"
                 end,
             ?render([
-                ?W(Node, 30),
-                ?W(QueueSizeLimitStr, 20),
-                ?W(Percent, 7),
-                ?W(Address, 19),
-                ?W(In, 11),
-                ?W(Out, 11),
-                ?W(Type, 7),
-                ?W(State, 10)
+                ?W(Node, NodeW),
+                ?W(QueueSizeLimitStr, QueueW),
+                ?W(Percent, PercentW),
+                ?W(Address, AddressW),
+                ?W(In, InW),
+                ?W(Out, OutW),
+                ?W(Type, TypeW),
+                ?W(State, StateW)
             ])
         end,
         lists:sort(DistNodesInfo)
     ),
     [Title | View].
+
+dist_node_widths() ->
+    observer_cli_lib:weighted_widths(
+        [30, 20, 7, 19, 11, 11, 7, 10],
+        [4, 1, 0, 4, 0, 0, 0, 0]
+    ).
 
 get_address(Info) ->
     #net_address{address = Address} = proplists:get_value(address, Info, #net_address{}),
@@ -219,22 +226,24 @@ render_cache_hit_rates(CacheHitInfo, Len) when Len =< 8 ->
     ],
     [Title | View];
 render_cache_hit_rates(CacheHitInfo, Len) ->
+    [HitCalls1W, HitCalls2W, HitCalls3W, HitCalls4W] = cache_hit_title_widths(),
     Title = ?render([
         ?UNDERLINE,
         ?GRAY_BG,
         "IN|",
-        ?W(" Hits/Calls", 20),
+        ?W(" Hits/Calls", HitCalls1W),
         ?W("HitRate", 6),
         "IN|",
-        ?W(" Hits/Calls", 20),
+        ?W(" Hits/Calls", HitCalls2W),
         ?W("HitRate", 6),
         "IN|",
-        ?W(" Hits/Calls", 20),
+        ?W(" Hits/Calls", HitCalls3W),
         ?W("HitRate", 6),
         "IN|",
-        ?W(" Hits/Calls", 19),
+        ?W(" Hits/Calls", HitCalls4W),
         ?W("HitRate", 6)
     ]),
+    [HitCallsRow1W, HitCallsRow2W, HitCallsRow3W, HitCallsRow4W] = cache_hit_row_widths(),
     Num = Len div 4,
     Rows = [
         begin
@@ -247,16 +256,16 @@ render_cache_hit_rates(CacheHitInfo, Len) ->
             {SeqStr4, Hit4, Call4, HitRateStr4} = get_cachehit_info(Seq4, CacheHitInfo),
             ?render([
                 SeqStr1,
-                ?W([Hit1, "/", Call1], 19),
+                ?W([Hit1, "/", Call1], HitCallsRow1W),
                 ?W(HitRateStr1, 6),
                 SeqStr2,
-                ?W([Hit2, "/", Call2], 19),
+                ?W([Hit2, "/", Call2], HitCallsRow2W),
                 ?W(HitRateStr2, 6),
                 SeqStr3,
-                ?W([Hit3, "/", Call3], 19),
+                ?W([Hit3, "/", Call3], HitCallsRow3W),
                 ?W(HitRateStr3, 6),
                 SeqStr4,
-                ?W([Hit4, "/", Call4], 18),
+                ?W([Hit4, "/", Call4], HitCallsRow4W),
                 ?W(HitRateStr4, 6)
             ])
         end
@@ -265,16 +274,18 @@ render_cache_hit_rates(CacheHitInfo, Len) ->
     [Title | Rows].
 
 render_block_size_info(AverageBlockCurs, AverageBlockMaxes, SbcsToMbcsCurs, SbcsToMbcsMaxs) ->
+    [AllocatorW, CurrentMbcsW, MaxMbcsW, CurrentSbcsW, MaxSbcsW, CurrentSbcsToMbcsW, MaxSbcsToMbcsW] =
+        block_size_widths(),
     Title = ?render([
         ?UNDERLINE,
         ?GRAY_BG,
-        ?W("Allocator Type", 16),
-        ?W("Current Mbcs", 16),
-        ?W("Max Mbcs", 16),
-        ?W("Current Sbcs", 16),
-        ?W("Max Sbcs", 16),
-        ?W("Current SbcsToMbcs", 19),
-        ?W("Max SbcsToMbcs", 19)
+        ?W("Allocator Type", AllocatorW),
+        ?W("Current Mbcs", CurrentMbcsW),
+        ?W("Max Mbcs", MaxMbcsW),
+        ?W("Current Sbcs", CurrentSbcsW),
+        ?W("Max Sbcs", MaxSbcsW),
+        ?W("Current SbcsToMbcs", CurrentSbcsToMbcsW),
+        ?W("Max SbcsToMbcs", MaxSbcsToMbcsW)
     ]),
     View = [
         begin
@@ -287,18 +298,30 @@ render_block_size_info(AverageBlockCurs, AverageBlockMaxes, SbcsToMbcsCurs, Sbcs
                     SbcsToMbcsMaxs
                 ),
             ?render([
-                ?W(Type, 16),
-                ?W(CMC, 16),
-                ?W(MMC, 16),
-                ?W(CSC, 16),
-                ?W(MSBC, 16),
-                ?W(CSTM, 19),
-                ?W(MSTM, 19)
+                ?W(Type, AllocatorW),
+                ?W(CMC, CurrentMbcsW),
+                ?W(MMC, MaxMbcsW),
+                ?W(CSC, CurrentSbcsW),
+                ?W(MSBC, MaxSbcsW),
+                ?W(CSTM, CurrentSbcsToMbcsW),
+                ?W(MSTM, MaxSbcsToMbcsW)
             ])
         end
      || AllocKey <- ?UTIL_ALLOCATORS
     ],
     [Title | View].
+
+cache_hit_title_widths() ->
+    observer_cli_lib:weighted_widths([20, 20, 20, 19], [1, 1, 1, 1]).
+
+cache_hit_row_widths() ->
+    observer_cli_lib:weighted_widths([19, 19, 19, 18], [1, 1, 1, 1]).
+
+block_size_widths() ->
+    observer_cli_lib:weighted_widths(
+        [16, 16, 16, 16, 16, 19, 19],
+        [0, 1, 1, 1, 1, 2, 2]
+    ).
 
 get_alloc(Key, Curs, Maxes, STMCurs, STMMaxes) ->
     CurRes = proplists:get_value(Key, Curs),
@@ -329,18 +352,41 @@ render_sys_info(Cmd) ->
     render_sys_info(System, CPU, Memory, Statistics).
 
 render_sys_info(System, CPU, Memory, Statistics) ->
+    [
+        SystemTitleW,
+        SystemStateTitleW,
+        CpuTitleW,
+        CpuStateTitleW,
+        MemoryTitleW,
+        MemoryStateTitleW,
+        StatisticsTitleW,
+        StatisticsStateTitleW
+    ] =
+        sys_info_title_widths(),
     Title = ?render([
         ?GRAY_BG,
         ?UNDERLINE,
-        ?W("System/Architecture", 22),
-        ?W("State", 8),
-        ?W("CPU's and Threads", 23),
-        ?W("State", 7),
-        ?W("Memory Usage", 11),
-        ?W("State", 22),
-        ?W("Statistics", 11),
-        ?W("State", 11)
+        ?W("System/Architecture", SystemTitleW),
+        ?W("State", SystemStateTitleW),
+        ?W("CPU's and Threads", CpuTitleW),
+        ?W("State", CpuStateTitleW),
+        ?W("Memory Usage", MemoryTitleW),
+        ?W("State", MemoryStateTitleW),
+        ?W("Statistics", StatisticsTitleW),
+        ?W("State", StatisticsStateTitleW)
     ]),
+    [
+        SystemW,
+        SystemStateW,
+        CpuW,
+        CpuStateW,
+        MemoryW,
+        MemoryValueW,
+        MemoryPercentW,
+        StatisticsW,
+        StatisticsStateW
+    ] =
+        sys_info_row_widths(),
     NewSystem = [
         begin
             {Key, Value}
@@ -360,25 +406,41 @@ render_sys_info(System, CPU, Memory, Statistics) ->
             {bytes, MemValInt} = MemVal,
             Percent = observer_cli_lib:to_percent(MemValInt / TotalMemInt),
             ?render([
-                ?W(SysKey, 22),
-                ?W(to_list(SysVal), 8),
-                ?W(CpuKey, 23),
-                ?W(to_list(CpuVal), 7),
-                ?W(MemKey, 11),
-                ?W(observer_cli_lib:to_byte(MemValInt), 13),
-                ?W(Percent, 6),
-                ?W(StatisticsKey, 11),
-                ?W(to_list(StatisticsVal), 11)
+                ?W(SysKey, SystemW),
+                ?W(to_list(SysVal), SystemStateW),
+                ?W(CpuKey, CpuW),
+                ?W(to_list(CpuVal), CpuStateW),
+                ?W(MemKey, MemoryW),
+                ?W(observer_cli_lib:to_byte(MemValInt), MemoryValueW),
+                ?W(Percent, MemoryPercentW),
+                ?W(StatisticsKey, StatisticsW),
+                ?W(to_list(StatisticsVal), StatisticsStateW)
             ])
         end
      || Pos <- lists:seq(1, 6)
     ],
+    [CompiledForW, CompiledValueW] = compiled_for_widths(),
     Compile = ?render([
         ?UNDERLINE,
-        ?W("compiled for", 22),
-        ?W(to_list(proplists:get_value("Compiled for", System)), 111)
+        ?W("compiled for", CompiledForW),
+        ?W(to_list(proplists:get_value("Compiled for", System)), CompiledValueW)
     ]),
     [Title | (Row ++ [Compile])].
+
+sys_info_title_widths() ->
+    observer_cli_lib:weighted_widths(
+        [22, 8, 23, 7, 11, 22, 11, 11],
+        [0, 1, 0, 1, 0, 1, 0, 1]
+    ).
+
+sys_info_row_widths() ->
+    observer_cli_lib:weighted_widths(
+        [22, 8, 23, 7, 11, 13, 6, 11, 11],
+        [0, 1, 0, 1, 0, 1, 0, 0, 1]
+    ).
+
+compiled_for_widths() ->
+    observer_cli_lib:weighted_widths([22, 111], [0, 1]).
 
 sys_info(Cmd) ->
     MemInfo =

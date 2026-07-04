@@ -61,6 +61,57 @@ get_table_list_running_test() ->
         cleanup_mnesia(Dir)
     end.
 
+render_mnesia_wide_layout_test() ->
+    Base = mnesia_row_widths(80),
+    Wide = mnesia_row_widths(180),
+    ?assertEqual([2, 3, 4, 7], unchanged_columns(Base, Wide, [2, 3, 4, 7])),
+    ?assertEqual([1, 5, 6, 8], wider_columns(Base, Wide, [1, 5, 6, 8])).
+
+mnesia_row_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            [Title, Row] = observer_cli_mnesia:render_mnesia(
+                [mnesia_fixture()], memory, 10, 1
+            ),
+            {observer_cli_test_io:column_widths(Title), observer_cli_test_io:column_widths(Row)}
+        end
+    ).
+
+mnesia_fixture() ->
+    {
+        0,
+        0,
+        [
+            {name, very_long_mnesia_table_name_for_layout},
+            {memory, 1024},
+            {size, 1},
+            {type, set},
+            {storage, ram_copies},
+            {owner, self()},
+            {index, []},
+            {reg_name, very_long_registered_name_for_layout}
+        ]
+    }.
+
+unchanged_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, BaseTitle) =:= lists:nth(Pos, WideTitle),
+        lists:nth(Pos, BaseRow) =:= lists:nth(Pos, WideRow)
+    ].
+
+wider_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, WideTitle) > lists:nth(Pos, BaseTitle),
+        lists:nth(Pos, WideRow) > lists:nth(Pos, BaseRow)
+    ].
+
 setup_mnesia(Dir) ->
     mnesia:stop(),
     catch mnesia:delete_schema([node()]),

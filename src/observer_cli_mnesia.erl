@@ -6,7 +6,7 @@
 -export([clean/1]).
 
 -ifdef(TEST).
--export([get_table_list/2, with_storage_type/3]).
+-export([get_table_list/2, render_mnesia/4, with_storage_type/3]).
 -endif.
 
 -include("observer_cli.hrl").
@@ -108,24 +108,37 @@ render_mnesia(MnesiaList, Attr, Rows, CurPage) ->
             memory -> {?RED_BG, ?GRAY_BG};
             _ -> {?GRAY_BG, ?RED_BG}
         end,
+    [
+        NameTitleW,
+        MemoryTitleW,
+        SizeTitleW,
+        TypeTitleW,
+        StorageTitleW,
+        OwnerTitleW,
+        IndexTitleW,
+        RegNameTitleW
+    ] =
+        mnesia_title_widths(),
     Title = ?render([
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Name", 25),
+        ?W2(?GRAY_BG, "Name", NameTitleW),
         ?UNDERLINE,
-        ?W2(MemColor, "    Memory    ", 16),
+        ?W2(MemColor, "    Memory    ", MemoryTitleW),
         ?UNDERLINE,
-        ?W2(SizeColor, "Size", 16),
+        ?W2(SizeColor, "Size", SizeTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Type", 12),
+        ?W2(?GRAY_BG, "Type", TypeTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Storage", 15),
+        ?W2(?GRAY_BG, "Storage", StorageTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Owner", 14),
+        ?W2(?GRAY_BG, "Owner", OwnerTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Index", 11),
+        ?W2(?GRAY_BG, "Index", IndexTitleW),
         ?UNDERLINE,
-        ?W2(?GRAY_BG, "Reg_name", 20)
+        ?W2(?GRAY_BG, "Reg_name", RegNameTitleW)
     ]),
+    [NameW, MemoryW, SizeW, TypeW, StorageW, OwnerW, IndexW, RegNameW] =
+        mnesia_row_widths(),
     View = [
         begin
             Name = proplists:get_value(name, Mnesia),
@@ -137,19 +150,31 @@ render_mnesia(MnesiaList, Attr, Rows, CurPage) ->
             Owner = proplists:get_value(owner, Mnesia),
             Storage = proplists:get_value(storage, Mnesia),
             ?render([
-                ?W(Name, 24),
-                ?W({byte, Memory}, 14),
-                ?W(Size, 14),
-                ?W(Type, 10),
-                ?W(Storage, 13),
-                ?W(Owner, 12),
-                ?W(Index, 9),
-                ?W(RegName, 19)
+                ?W(Name, NameW),
+                ?W({byte, Memory}, MemoryW),
+                ?W(Size, SizeW),
+                ?W(Type, TypeW),
+                ?W(Storage, StorageW),
+                ?W(Owner, OwnerW),
+                ?W(Index, IndexW),
+                ?W(RegName, RegNameW)
             ])
         end
      || {_, _, Mnesia} <- SortMnesia
     ],
     [Title | View].
+
+mnesia_title_widths() ->
+    observer_cli_lib:weighted_widths(
+        [25, 16, 16, 12, 15, 14, 11, 20],
+        [4, 0, 0, 0, 1, 1, 0, 4]
+    ).
+
+mnesia_row_widths() ->
+    observer_cli_lib:weighted_widths(
+        [24, 14, 14, 10, 13, 12, 9, 19],
+        [4, 0, 0, 0, 1, 1, 0, 4]
+    ).
 
 mnesia_tables() ->
     [

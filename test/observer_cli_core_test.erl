@@ -96,6 +96,53 @@ render_memory_process_line_error_logger_test() ->
         end
     end.
 
+render_home_summary_wide_layout_test() ->
+    observer_cli_test_io:with_geometry(
+        24,
+        160,
+        [],
+        fun() ->
+            {StableInfo, PortParallelism} = observer_cli:get_stable_system_info(),
+            SystemLines = observer_cli:render_system_line(
+                "printf 'header\n 1 2\n'", StableInfo
+            ),
+            MemLines = observer_cli:render_memory_process_line(
+                {1, 2, 3, 4}, PortParallelism, 1500
+            ),
+            [SystemTitle | _] = SystemLines,
+            [MemTitle | _] = MemLines,
+            ?assertEqual(
+                observer_cli_lib:layout_width(), hd(home_summary_line_lengths(SystemTitle))
+            ),
+            ?assertEqual([15, 26, 30, 25, 25, 31], home_summary_widths(SystemTitle)),
+            ?assertEqual([15, 26, 30, 25, 25, 31], home_summary_widths(MemTitle)),
+            ?assert(
+                lists:all(
+                    fun(Len) -> Len =< observer_cli_lib:layout_width() end,
+                    home_summary_line_lengths(SystemTitle)
+                )
+            ),
+            ?assert(
+                lists:all(
+                    fun(Len) -> Len =< observer_cli_lib:layout_width() end,
+                    home_summary_line_lengths(MemTitle)
+                )
+            ),
+            ?assert(
+                lists:all(
+                    fun(Len) -> Len =< observer_cli_lib:layout_width() end,
+                    rendered_line_lengths(SystemLines)
+                )
+            ),
+            ?assert(
+                lists:all(
+                    fun(Len) -> Len =< observer_cli_lib:layout_width() end,
+                    rendered_line_lengths(MemLines)
+                )
+            )
+        end
+    ).
+
 render_scheduler_usage_test() ->
     ?assertEqual({0, []}, observer_cli:render_scheduler_usage(undefined)),
     {2, _} = observer_cli:render_scheduler_usage([{1, 0.1}, {2, 0.2}, {3, 0.3}, {4, 0.4}]),
@@ -111,6 +158,35 @@ render_scheduler_usage_test() ->
     ),
     {11, _} = observer_cli:render_scheduler_usage(
         lists:map(fun(N) -> {N, 0.1} end, lists:seq(1, 110))
+    ).
+
+render_scheduler_usage_wide_layout_test() ->
+    observer_cli_test_io:with_geometry(
+        24,
+        160,
+        [],
+        fun() ->
+            Samples = [
+                [{1, 0.1}, {2, 0.2}, {3, 0.3}, {4, 0.4}],
+                lists:map(fun(N) -> {N, 0.1} end, lists:seq(1, 8)),
+                lists:map(fun(N) -> {N, 0.1} end, lists:seq(1, 101))
+            ],
+            ?assert(
+                lists:all(
+                    fun(SchedulerUsage) ->
+                        {_Rows, Lines} = observer_cli:render_scheduler_usage(SchedulerUsage),
+                        lists:all(
+                            fun(Line) ->
+                                observer_cli_lib:visible_length(Line) =:=
+                                    observer_cli_lib:layout_width()
+                            end,
+                            Lines
+                        )
+                    end,
+                    Samples
+                )
+            )
+        end
     ).
 
 render_top_n_view_test() ->
@@ -146,6 +222,21 @@ render_top_n_view_test() ->
     ?assertEqual(3, length(Rows5)),
     erlang:exit(Pid2, kill),
     {PidList1, Rows1, Rows2, Rows3, Rows4, Rows5}.
+
+render_top_n_view_wide_layout_test() ->
+    Pid = self(),
+    Call = [
+        {registered_name, undefined},
+        {current_function,
+            {very_long_current_module_for_layout, very_long_current_function_for_layout, 2}},
+        {initial_call,
+            {very_long_initial_module_for_layout, very_long_initial_function_for_layout, 1}}
+    ],
+    {_, [Title, Row]} = observer_cli:render_top_n_view(
+        memory, [{Pid, 1000, Call}], 1, [{1, 1}], 1, 160
+    ),
+    ?assertEqual(160, observer_cli_lib:visible_length(Title)),
+    ?assertEqual(160, observer_cli_lib:visible_length(Row)).
 
 get_top_n_info_translated_call_test() ->
     Pid = spawn(fun() -> receive
@@ -240,5 +331,34 @@ node_stats_test() ->
 
 check_auto_row_test() ->
     ?assert(is_boolean(observer_cli:check_auto_row())).
+
+home_summary_widths(IoData) ->
+    Header =
+        case non_empty_lines(IoData) of
+            [_First, Second | _] -> Second;
+            [Only] -> Only
+        end,
+    Parts = string:split(Header, "|", all),
+    Inner = lists:sublist(Parts, 2, length(Parts) - 2),
+    [length(P) || P <- Inner].
+
+non_empty_lines(IoData) ->
+    [Line || Line <- string:split(plain(IoData), "\n", all), Line =/= ""].
+
+home_summary_line_lengths(IoData) ->
+    [length(Line) || Line <- non_empty_lines(IoData)].
+
+rendered_line_lengths(IoDatas) ->
+    lists:flatmap(fun home_summary_line_lengths/1, IoDatas).
+
+plain(IoData) ->
+    binary_to_list(
+        re:replace(
+            unicode:characters_to_binary(IoData),
+            <<"\e\\[[0-9;]*[A-Za-z]">>,
+            <<>>,
+            [global, {return, binary}]
+        )
+    ).
 
 -endif.

@@ -20,6 +20,33 @@ render_last_line_test() ->
     Line = observer_cli_lib:render_last_line("q(quit)"),
     ?assert(string:find(lists:flatten(Line), "q(quit)") =/= nomatch).
 
+render_keeps_unicode_text_test() ->
+    Line = observer_cli_lib:render([?W("中文", 10)]),
+    ?assert(string:find(Line, "中文") =/= nomatch).
+
+layout_width_keeps_base_width_test() ->
+    observer_cli_test_io:with_geometry(
+        24,
+        80,
+        [],
+        fun() ->
+            ?assertEqual(?COLUMN + 5, observer_cli_lib:layout_width())
+        end
+    ).
+
+layout_width_uses_wide_terminal_test() ->
+    observer_cli_test_io:with_geometry(
+        24,
+        160,
+        [],
+        fun() ->
+            ?assertEqual(159, observer_cli_lib:layout_width()),
+            ?assertEqual(
+                159, observer_cli_lib:visible_length(observer_cli_lib:render_last_line("q"))
+            )
+        end
+    ).
+
 get_terminal_rows_test() ->
     application:set_env(observer_cli, default_row_size, 20),
     ?assertEqual(20, observer_cli_lib:get_terminal_rows(false)),

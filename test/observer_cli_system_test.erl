@@ -122,6 +122,18 @@ render_sys_info_test() ->
     Line = observer_cli_system:render_sys_info(System, CPU, Memory, Statistics),
     ?assert(string:find(lists:flatten(Line), "System/Architecture") =/= nomatch).
 
+render_sys_info_wide_layout_test() ->
+    Base = sys_info_widths(80),
+    Wide = sys_info_widths(180),
+    {BaseTitle, BaseRow, BaseCompile} = Base,
+    {WideTitle, WideRow, WideCompile} = Wide,
+    ?assertEqual([1, 3, 5, 7], same_columns(BaseTitle, WideTitle, [1, 3, 5, 7])),
+    ?assertEqual([2, 4, 6, 8], wider_columns(BaseTitle, WideTitle, [2, 4, 6, 8])),
+    ?assertEqual([1, 3, 5, 7, 8], same_columns(BaseRow, WideRow, [1, 3, 5, 7, 8])),
+    ?assertEqual([2, 4, 6, 9], wider_columns(BaseRow, WideRow, [2, 4, 6, 9])),
+    ?assertEqual(lists:nth(1, BaseCompile), lists:nth(1, WideCompile)),
+    ?assert(lists:nth(2, WideCompile) > lists:nth(2, BaseCompile)).
+
 render_sys_info_empty_ps_test() ->
     Line = observer_cli_system:render_sys_info("printf 'header\\n'"),
     ?assert(string:find(lists:flatten(Line), "System/Architecture") =/= nomatch).
@@ -143,6 +155,12 @@ render_cache_hit_rates_test() ->
         ),
     Large = observer_cli_system:render_cache_hit_rates(LargeList, 12),
     ?assert(string:find(lists:flatten(Large), "IN|") =/= nomatch).
+
+render_cache_hit_rates_wide_layout_test() ->
+    Base = cache_hit_widths(80),
+    Wide = cache_hit_widths(180),
+    ?assertEqual([1, 3, 4, 6, 7, 9, 10], same_columns(Base, Wide, [1, 3, 4, 6, 7, 9, 10])),
+    ?assertEqual([2, 5, 8, 11], wider_columns(Base, Wide, [2, 5, 8, 11])).
 
 render_block_size_info_test() ->
     Allocators = [
@@ -169,6 +187,12 @@ render_block_size_info_test() ->
          || Item <- observer_cli_system:get_alloc(binary_alloc, Curs, Maxes, STMCurs, STMMaxs)
         ]
     ).
+
+render_block_size_info_wide_layout_test() ->
+    Base = block_size_widths(80),
+    Wide = block_size_widths(180),
+    ?assertEqual([1], same_columns(Base, Wide, [1])),
+    ?assertEqual([2, 3, 4, 5, 6, 7], wider_columns(Base, Wide, [2, 3, 4, 5, 6, 7])).
 
 get_address_invalid_test() ->
     Info = [{address, #net_address{address = {foo, 1234}}}],
@@ -205,6 +229,17 @@ render_dist_node_info_fake_test() ->
         false -> ok
     end.
 
+render_dist_node_info_wide_layout_test() ->
+    Created = ensure_sys_dist(),
+    try
+        Base = dist_node_widths(80),
+        Wide = dist_node_widths(180),
+        ?assertEqual([3, 5, 6, 7, 8], unchanged_columns(Base, Wide, [3, 5, 6, 7, 8])),
+        ?assertEqual([1, 2, 4], wider_columns(Base, Wide, [1, 2, 4]))
+    after
+        maybe_delete_sys_dist(Created)
+    end.
+
 render_worker_redraw_test() ->
     Cmd = "printf 'header\\n 1 2 3 4\\n'",
     Pid = spawn(fun() -> observer_cli_system:render_worker(Cmd, 1, ?INIT_TIME_REF) end),
@@ -217,5 +252,177 @@ render_worker_redraw_test() ->
     after 1000 ->
         ok
     end.
+
+sys_info_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            [Title, Row | Rest] = observer_cli_system:render_sys_info(
+                system_fixture(), cpu_fixture(), memory_fixture(), statistics_fixture()
+            ),
+            Compile = lists:last(Rest),
+            {
+                observer_cli_test_io:column_widths(Title),
+                observer_cli_test_io:column_widths(Row),
+                observer_cli_test_io:column_widths(Compile)
+            }
+        end
+    ).
+
+dist_node_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            [Title, Row] = observer_cli_system:render_dist_node_info(dist_node_fixture()),
+            {observer_cli_test_io:column_widths(Title), observer_cli_test_io:column_widths(Row)}
+        end
+    ).
+
+cache_hit_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            [Title | _] = observer_cli_system:render_cache_hit_rates(cache_hit_fixture(), 12),
+            observer_cli_test_io:column_widths(Title)
+        end
+    ).
+
+block_size_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            [Title | _] = observer_cli_system:render_block_size_info(
+                allocator_curs(), allocator_maxes(), allocator_sbcs_curs(), allocator_sbcs_maxes()
+            ),
+            observer_cli_test_io:column_widths(Title)
+        end
+    ).
+
+cache_hit_fixture() ->
+    [
+        {{instance, Seq}, [{hit_rate, 0.1}, {hits, Seq}, {calls, Seq + 1}]}
+     || Seq <- lists:seq(1, 12)
+    ].
+
+allocator_curs() ->
+    [{A, [{mbcs, 1}, {sbcs, 2}]} || A <- allocators()].
+
+allocator_maxes() ->
+    [{A, [{mbcs, 3}, {sbcs, 4}]} || A <- allocators()].
+
+allocator_sbcs_curs() ->
+    [{A, "1"} || A <- allocators()].
+
+allocator_sbcs_maxes() ->
+    [{A, "2"} || A <- allocators()].
+
+allocators() ->
+    [
+        binary_alloc,
+        driver_alloc,
+        eheap_alloc,
+        ets_alloc,
+        fix_alloc,
+        ll_alloc,
+        sl_alloc,
+        std_alloc,
+        temp_alloc
+    ].
+
+system_fixture() ->
+    [
+        {"System Version", "A"},
+        {"Erts Version", "B"},
+        {"Compiled for", "C"},
+        {"Emulator Wordsize", 8},
+        {"Process Wordsize", 8},
+        {"Smp Support", true},
+        {"Thread Support", true},
+        {"Async thread pool size", 2}
+    ].
+
+cpu_fixture() ->
+    [
+        {"Logical CPU's", 1},
+        {"Online Logical CPU's", 1},
+        {"Available Logical CPU's", 1},
+        {"Schedulers", 1},
+        {"Online schedulers", 1},
+        {"Available schedulers", 1}
+    ].
+
+memory_fixture() ->
+    [
+        {"Total", {bytes, 100}},
+        {"Processes", {bytes, 10}},
+        {"Atoms", {bytes, 5}},
+        {"Binaries", {bytes, 2}},
+        {"Code", {bytes, 3}},
+        {"Ets", {bytes, 4}}
+    ].
+
+statistics_fixture() ->
+    [
+        {"ps -o pcpu", "1%"},
+        {"ps -o pmem", "2%"},
+        {"ps -o rss", {bytes, 3}},
+        {"ps -o vsz", {bytes, 4}},
+        {"Total IOIn", {bytes, 5}},
+        {"Total IOOut", {bytes, 6}}
+    ].
+
+dist_node_fixture() ->
+    [
+        {'very_long_fake_node_for_layout@127.0.0.1', [
+            {state, connected},
+            {type, normal},
+            {address, #net_address{address = {{127, 0, 0, 1}, 1234}}},
+            {in, 1},
+            {out, 2}
+        ]}
+    ].
+
+ensure_sys_dist() ->
+    case ets:info(sys_dist, owner) of
+        undefined ->
+            ets:new(sys_dist, [named_table, public, set]),
+            true;
+        _ ->
+            false
+    end.
+
+maybe_delete_sys_dist(true) ->
+    ets:delete(sys_dist);
+maybe_delete_sys_dist(false) ->
+    ok.
+
+unchanged_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, BaseTitle) =:= lists:nth(Pos, WideTitle),
+        lists:nth(Pos, BaseRow) =:= lists:nth(Pos, WideRow)
+    ].
+
+wider_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, WideTitle) > lists:nth(Pos, BaseTitle),
+        lists:nth(Pos, WideRow) > lists:nth(Pos, BaseRow)
+    ];
+wider_columns(Base, Wide, Columns) ->
+    [Pos || Pos <- Columns, lists:nth(Pos, Wide) > lists:nth(Pos, Base)].
+
+same_columns(Base, Wide, Columns) ->
+    [Pos || Pos <- Columns, lists:nth(Pos, Base) =:= lists:nth(Pos, Wide)].
 
 -endif.

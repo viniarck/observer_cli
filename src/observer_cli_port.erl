@@ -122,38 +122,41 @@ render_port_info(#{
             true -> ?RED;
             false -> ?GREEN
         end,
+    [Attr1W, Value1W, Attr2W, Value2W, Attr3W, Value3W] =
+        port_info_widths([18, 20, 18, 20, 19, 21]),
     Title =
         ?render([
             ?GRAY_BG,
-            ?W("Attr", 18),
-            ?W("Value", 20),
-            ?W("Attr", 18),
-            ?W("Value", 20),
-            ?W("Attr", 19),
-            ?W("Value", 21)
+            ?W("Attr", Attr1W),
+            ?W("Value", Value1W),
+            ?W("Attr", Attr2W),
+            ?W("Value", Value2W),
+            ?W("Attr", Attr3W),
+            ?W("Value", Value3W)
         ]),
     Rows =
         ?render([
-            ?W("port", 18),
-            ?W(Port, 20),
-            ?W("id", 18),
-            ?W(Id, 20),
-            ?W("name", 19),
-            ?W(Name, 21),
+            ?W("port", Attr1W),
+            ?W(Port, Value1W),
+            ?W("id", Attr2W),
+            ?W(Id, Value2W),
+            ?W("name", Attr3W),
+            ?W(Name, Value3W),
             ?NEW_LINE,
-            ?W("queue_size", 18),
-            ?W2(QueueSizeColor, QueueSize, 21),
-            ?W(" input", 19),
-            ?W({byte, Input}, 20),
-            ?W("output", 19),
-            ?W({byte, Output}, 21),
+            ?W("queue_size", Attr1W),
+            ?W2(QueueSizeColor, QueueSize, Value1W + 1),
+            " ",
+            ?W("input", Attr2W),
+            ?W({byte, Input}, Value2W),
+            ?W("output", Attr3W),
+            ?W({byte, Output}, Value3W),
             ?NEW_LINE,
-            ?W("connected", 18),
-            ?W(Connected, 20),
-            ?W("memory", 18),
-            ?W({byte, Memory}, 20),
-            ?W("os_pid", 19),
-            ?W(OsPid, 21)
+            ?W("connected", Attr1W),
+            ?W(Connected, Value1W),
+            ?W("memory", Attr2W),
+            ?W({byte, Memory}, Value2W),
+            ?W("os_pid", Attr3W),
+            ?W(OsPid, Value3W)
         ]),
     [Title, Rows].
 
@@ -177,12 +180,15 @@ render_link_monitor(Link, Monitors) ->
     ],
     LinkInfo = "Links(" ++ erlang:integer_to_list(erlang:length(Link)) ++ ")",
     MonitorInfo = "Monitors(" ++ erlang:integer_to_list(erlang:length(Monitors)) ++ ")",
+    Extra = observer_cli_lib:layout_extra_width(),
+    ValueW = 110 + Extra + wide_fill(5),
     ?render([
         ?W(LinkInfo, 18),
-        ?W(LinkStr, 110),
+        ?W(LinkStr, ValueW),
         ?NEW_LINE,
-        ?W2(?UNDERLINE, MonitorInfo, 19),
-        ?W2(?UNDERLINE, MonitorsStr, 111)
+        ?UNDERLINE,
+        ?W(MonitorInfo, 18),
+        ?W(MonitorsStr, ValueW)
     ]).
 
 render_type_line(List) ->
@@ -196,12 +202,13 @@ render_type_line(List) ->
             {_, Sock} -> addr_to_str(Sock);
             false -> "undefined"
         end,
+    [SockW, ArrowW, PeerW] = type_line_widths(),
     Line1 =
         ?render([
             ?UNDERLINE,
-            ?W("            " ++ SockName ++ "(sockname)", 55),
-            ?W("<=============>", 15),
-            ?W("            " ++ PeerName ++ "(peername)", 55)
+            ?W("            " ++ SockName ++ "(sockname)", SockW),
+            ?W("<=============>", ArrowW),
+            ?W("            " ++ PeerName ++ "(peername)", PeerW)
         ]),
     Line2 =
         case lists:keyfind(statistics, 1, List) of
@@ -212,6 +219,12 @@ render_type_line(List) ->
         {_, Opts} -> Line2 ++ [render_opts(Opts)];
         false -> Line2
     end.
+
+port_info_widths(Base) ->
+    fill_last(observer_cli_lib:weighted_widths(Base, [0, 1, 0, 1, 0, 3]), wide_fill(5)).
+
+type_line_widths() ->
+    fill_last(observer_cli_lib:weighted_widths([55, 15, 55], [1, 0, 1]), wide_fill(5)).
 
 render_stats(Stats) ->
     RecvOct = proplists:get_value(recv_oct, Stats),
@@ -224,28 +237,41 @@ render_stats(Stats) ->
     SendMax = proplists:get_value(send_max, Stats),
     SendAvg = proplists:get_value(send_avg, Stats),
     SendPend = proplists:get_value(send_pend, Stats),
+    [
+        CntLabelW,
+        CntValueW,
+        OctLabelW,
+        OctValueW,
+        MaxLabelW,
+        MaxValueW,
+        AvgLabelW,
+        AvgValueW,
+        LastLabelW,
+        LastValueW
+    ] =
+        stats_widths(),
     ?render([
-        ?W("recv_cnt", 9),
-        ?W(RecvCnt, 12),
-        ?W("recv_oct", 8),
-        ?W({byte, RecvOct}, 12),
-        ?W("recv_max", 9),
-        ?W({byte, RecvMax}, 12),
-        ?W("recv_avg", 9),
-        ?W({byte, RecvAvg}, 12),
-        ?W("recv_dvi", 9),
-        ?W({byte, RecvDvi}, 12),
+        ?W("recv_cnt", CntLabelW),
+        ?W(RecvCnt, CntValueW),
+        ?W("recv_oct", OctLabelW),
+        ?W({byte, RecvOct}, OctValueW),
+        ?W("recv_max", MaxLabelW),
+        ?W({byte, RecvMax}, MaxValueW),
+        ?W("recv_avg", AvgLabelW),
+        ?W({byte, RecvAvg}, AvgValueW),
+        ?W("recv_dvi", LastLabelW),
+        ?W({byte, RecvDvi}, LastValueW),
         ?NEW_LINE,
-        ?W("send_cnt", 9),
-        ?W(SendCnt, 12),
-        ?W("send_oct", 8),
-        ?W({byte, SendOct}, 12),
-        ?W("send_max", 9),
-        ?W({byte, SendMax}, 12),
-        ?W("send_avg", 9),
-        ?W({byte, SendAvg}, 12),
-        ?W("send_pend", 9),
-        ?W(SendPend, 12)
+        ?W("send_cnt", CntLabelW),
+        ?W(SendCnt, CntValueW),
+        ?W("send_oct", OctLabelW),
+        ?W({byte, SendOct}, OctValueW),
+        ?W("send_max", MaxLabelW),
+        ?W({byte, SendMax}, MaxValueW),
+        ?W("send_avg", AvgLabelW),
+        ?W({byte, SendAvg}, AvgValueW),
+        ?W("send_pend", LastLabelW),
+        ?W(SendPend, LastValueW)
     ]).
 
 render_opts(Opts) ->
@@ -272,76 +298,105 @@ render_opts(Opts) ->
     ReuseAddr = proplists:get_value(reuseaddr, Opts),
     SendTimeout = proplists:get_value(send_timeout, Opts),
     SndBuf = proplists:get_value(sndbuf, Opts),
+    [Option1W, Value1W, Option2W, Value2W, Option3W, Value3W, Option4W, Value4W, Option5W, Value5W] =
+        opts_widths(),
     Title =
         ?render([
             ?GRAY_BG,
-            ?W("Option", 9),
-            ?W("Value", 6),
-            ?W("Option", 14),
-            ?W("Value", 12),
-            ?W("Option", 9),
-            ?W("Value", 12),
-            ?W("Option", 13),
-            ?W("Value", 8),
-            ?W("Option", 9),
-            ?W("Value", 12)
+            ?W("Option", Option1W),
+            ?W("Value", Value1W),
+            ?W("Option", Option2W),
+            ?W("Value", Value2W),
+            ?W("Option", Option3W),
+            ?W("Value", Value3W),
+            ?W("Option", Option4W),
+            ?W("Value", Value4W),
+            ?W("Option", Option5W),
+            ?W("Value", Value5W)
         ]),
     Rows =
         ?render([
-            ?W("mode", 9),
-            ?W(Mode, 6),
-            ?W("recbuf", 14),
-            ?W({byte, RecBuf}, 12),
-            ?W("sndbuf", 9),
-            ?W({byte, SndBuf}, 12),
-            ?W("delay_send", 13),
-            ?W(DelaySend, 8),
-            ?W("dontroute", 9),
-            ?W(DontRoute, 12),
+            ?W("mode", Option1W),
+            ?W(Mode, Value1W),
+            ?W("recbuf", Option2W),
+            ?W({byte, RecBuf}, Value2W),
+            ?W("sndbuf", Option3W),
+            ?W({byte, SndBuf}, Value3W),
+            ?W("delay_send", Option4W),
+            ?W(DelaySend, Value4W),
+            ?W("dontroute", Option5W),
+            ?W(DontRoute, Value5W),
             ?NEW_LINE,
-            ?W("reuseaddr", 9),
-            ?W(ReuseAddr, 6),
-            ?W("packet_size", 14),
-            ?W({byte, PacketSize}, 12),
-            ?W("buffer", 9),
-            ?W({byte, Buffer}, 12),
-            ?W("exit_on_close", 13),
-            ?W(ExitOnClose, 8),
-            ?W("priority", 9),
-            ?W(Priority, 12),
+            ?W("reuseaddr", Option1W),
+            ?W(ReuseAddr, Value1W),
+            ?W("packet_size", Option2W),
+            ?W({byte, PacketSize}, Value2W),
+            ?W("buffer", Option3W),
+            ?W({byte, Buffer}, Value3W),
+            ?W("exit_on_close", Option4W),
+            ?W(ExitOnClose, Value4W),
+            ?W("priority", Option5W),
+            ?W(Priority, Value5W),
             ?NEW_LINE,
-            ?W("active", 9),
-            ?W(Active, 6),
-            ?W("low_watermark", 14),
-            ?W({byte, LowWatermark}, 12),
-            ?W("header", 9),
-            ?W(Header, 12),
-            ?W("keepalive", 13),
-            ?W(KeepAlive, 8),
-            ?W("linger", 9),
-            ?W(Linger, 12),
+            ?W("active", Option1W),
+            ?W(Active, Value1W),
+            ?W("low_watermark", Option2W),
+            ?W({byte, LowWatermark}, Value2W),
+            ?W("header", Option3W),
+            ?W(Header, Value3W),
+            ?W("keepalive", Option4W),
+            ?W(KeepAlive, Value4W),
+            ?W("linger", Option5W),
+            ?W(Linger, Value5W),
             ?NEW_LINE,
-            ?W("nodelay", 9),
-            ?W(NoDelay, 6),
-            ?W("high_watermark", 14),
-            ?W({byte, HighWatermark}, 12),
-            ?W("broadcast", 9),
-            ?W(Broadcast, 12),
-            ?W("send_timeout", 13),
-            ?W(SendTimeout, 8),
-            ?W("packet", 9),
-            ?W(Packet, 12)
+            ?W("nodelay", Option1W),
+            ?W(NoDelay, Value1W),
+            ?W("high_watermark", Option2W),
+            ?W({byte, HighWatermark}, Value2W),
+            ?W("broadcast", Option3W),
+            ?W(Broadcast, Value3W),
+            ?W("send_timeout", Option4W),
+            ?W(SendTimeout, Value4W),
+            ?W("packet", Option5W),
+            ?W(Packet, Value5W)
         ]),
     [Title, Rows].
 
+stats_widths() ->
+    fill_last(
+        observer_cli_lib:weighted_widths([9, 12, 8, 12, 9, 12, 9, 12, 9, 12], [
+            0, 1, 0, 1, 0, 1, 0, 1, 0, 1
+        ]),
+        wide_fill(5)
+    ).
+
+opts_widths() ->
+    fill_last(
+        observer_cli_lib:weighted_widths([9, 6, 14, 12, 9, 12, 13, 8, 9, 12], [
+            0, 1, 0, 2, 0, 2, 0, 1, 0, 2
+        ]),
+        wide_fill(5)
+    ).
+
+wide_fill(Amount) ->
+    case observer_cli_lib:layout_extra_width() of
+        0 -> 0;
+        _ -> Amount
+    end.
+
+fill_last([Last], Amount) ->
+    [Last + Amount];
+fill_last([Width | Rest], Amount) ->
+    [Width | fill_last(Rest, Amount)].
+
 render_last_line() ->
-    io_lib:format("|\e[7mq(quit) ~124.124s\e[0m|~n", [" "]).
+    observer_cli_lib:render_last_line("q(quit)").
 
 render_menu(Type, Interval) ->
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
     Title = get_menu_title(Type),
     UpTime = observer_cli_lib:uptime(),
-    TitleWidth = ?COLUMN + 41 - erlang:length(UpTime),
+    TitleWidth = ?COLUMN + 41 - erlang:length(UpTime) + observer_cli_lib:layout_extra_width(),
     ?render([?W([Title | Text], TitleWidth) | UpTime]).
 
 get_menu_title(Type) ->

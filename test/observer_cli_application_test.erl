@@ -74,4 +74,39 @@ start_manager_branches_test() ->
 find_group_leader_test() ->
     ?assert(is_pid(observer_cli_application:find_group_leader(self()))).
 
+render_app_info_wide_layout_test() ->
+    Base = app_row_widths(80),
+    Wide = app_row_widths(180),
+    ?assertEqual([1, 3, 4, 6, 7], unchanged_columns(Base, Wide, [1, 3, 4, 6, 7])),
+    ?assertEqual([2, 5, 8], wider_columns(Base, Wide, [2, 5, 8])).
+
+app_row_widths(Columns) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            [Title, Row | _] = observer_cli_application:render_app_info(
+                20, 1, {proc_count, 1}
+            ),
+            {observer_cli_test_io:column_widths(Title), observer_cli_test_io:column_widths(Row)}
+        end
+    ).
+
+unchanged_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, BaseTitle) =:= lists:nth(Pos, WideTitle),
+        lists:nth(Pos, BaseRow) =:= lists:nth(Pos, WideRow)
+    ].
+
+wider_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
+    [
+        Pos
+     || Pos <- Columns,
+        lists:nth(Pos, WideTitle) > lists:nth(Pos, BaseTitle),
+        lists:nth(Pos, WideRow) > lists:nth(Pos, BaseRow)
+    ].
+
 -endif.

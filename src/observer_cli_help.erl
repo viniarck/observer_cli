@@ -13,6 +13,7 @@
 -endif.
 
 -define(HELP_COLUMN_WIDTH, 85).
+-define(SHORTCUT_COLUMN_WIDTH, 12).
 
 -spec start(view_opts()) -> no_return().
 start(#view_opts{help = #help{interval = Interval}} = ViewOpts) ->
@@ -60,33 +61,55 @@ render_doc(Text) ->
 
 render_help() ->
     [
-        "|\e[44m1. Start Mode\e[49m \n",
+        "|Doc - Shortcuts and command examples\n",
+        section("1. Start Mode"),
         "| \e[48;2;80;80;80m1.1\e[0m  observer_cli:start(). \n",
         "| \e[48;2;80;80;80m1.2\e[0m  observer_cli:start(Node).\n",
         "| \e[48;2;80;80;80m1.3\e[0m  observer_cli:start(Node, Cookie).\n",
 
-        "|\e[44m2. HOME(H) Commands\e[49m \n",
-        "| \e[48;2;80;80;80m`            \e[0m  enable/disable schedule usage.\n",
-        "| \e[48;2;80;80;80mPageDown     \e[0m  pd or F(forward).\n",
-        "| \e[48;2;80;80;80mPageUp       \e[0m  pu or B(back).\n",
-        "| \e[48;2;80;80;80mr            \e[0m switch mode to reduction(proc_count).\n",
-        "| \e[48;2;80;80;80mrr           \e[0m switch mode to reduction(proc_window).\n",
-        "| \e[48;2;80;80;80mm            \e[0m switch mode to memory(proc_count).\n",
-        "| \e[48;2;80;80;80mmm           \e[0m switch mode to memory(proc_window).\n",
-        "| \e[48;2;80;80;80mb            \e[0m switch mode to bin memory(proc_count).\n",
-        "| \e[48;2;80;80;80mbb           \e[0m switch mode to bin memory(proc_window).\n",
-        "| \e[48;2;80;80;80mmq           \e[0m switch mode to message queue len(proc_count).\n",
-        "| \e[48;2;80;80;80mmmq          \e[0m switch mode to message queue len(proc_window).\n",
-        "| \e[48;2;80;80;80mt            \e[0m switch mode to total heap size(proc_count).\n",
-        "| \e[48;2;80;80;80mtt           \e[0m switch mode to total heap size(proc_window).\n",
-        "| \e[48;2;80;80;80m3000         \e[0m set interval time to 3000ms, the integer must >= 1500.\n",
-        "| \e[48;2;80;80;80m13           \e[0m choose the 13th process(green line), the integer must in top list.\n",
-        "| \e[48;2;80;80;80m<0.43.0>     \e[0m choose the <0.43.0> process, the pid does not need to be in the top list.\n",
-        "| \e[48;2;80;80;80m<431 or >431 \e[0m choose the <0.431.0> process, the pid does not need to be in the top list.\n",
-        "| \e[48;2;80;80;80mp            \e[0m pause/unpause the view.\n",
+        section("2. Global Commands"),
+        shortcut("PageDown", "pd or F(forward)."),
+        shortcut("PageUp", "pu or B(back)."),
+        shortcut("3000", "set interval time to 3000ms, the integer must >= 1500."),
+        shortcut("p", "pause/unpause the view."),
 
-        "|\e[44m5. Reference\e[49m \n",
+        section("3. HOME(H) Commands"),
+        shortcut("`", "enable/disable schedule usage."),
+        shortcut("r", "switch mode to reduction(proc_count)."),
+        shortcut("rr", "switch mode to reduction(proc_window)."),
+        shortcut("m", "switch mode to memory(proc_count)."),
+        shortcut("mm", "switch mode to memory(proc_window)."),
+        shortcut("b", "switch mode to bin memory(proc_count)."),
+        shortcut("bb", "switch mode to bin memory(proc_window)."),
+        shortcut("mq", "switch mode to message queue len(proc_count)."),
+        shortcut("mmq", "switch mode to message queue len(proc_window)."),
+        shortcut("t", "switch mode to total heap size(proc_count)."),
+        shortcut("tt", "switch mode to total heap size(proc_window)."),
+
+        section("4. Process Select Examples"),
+        shortcut("13", "choose the 13th process(green line), the integer must in top list."),
+        shortcut(
+            "<0.43.0>", "choose the <0.43.0> process, the pid does not need to be in the top list."
+        ),
+        shortcut(
+            "<431 or >431",
+            "choose the <0.431.0> process, the pid does not need to be in the top list."
+        ),
+
+        section("5. Reference"),
         "|More information about recon:proc_count/2 and recon:proc_window/3 \n",
         "|refer to https://github.com/ferd/recon/blob/master/src/recon.erl  \n",
         "|Any issue please visit: https://github.com/zhongwencool/observer_cli/issues  \n"
+    ].
+
+section(Text) ->
+    ["|\e[44m", Text, "\e[49m \n"].
+
+shortcut(Key, Desc) ->
+    [
+        "| \e[48;2;80;80;80m",
+        io_lib:format("~-*s", [?SHORTCUT_COLUMN_WIDTH, Key]),
+        "\e[0m ",
+        Desc,
+        "\n"
     ].
