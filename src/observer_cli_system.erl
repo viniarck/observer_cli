@@ -8,14 +8,18 @@
 
 %% API
 -export([start/1]).
--export([clean/1]).
 
 -ifdef(TEST).
 -export([
+    collect_distribution_info/0,
+    collect_os_process_info/1,
+    collect_system_info/1,
+    collect_sys_info/1,
     fill_info/2,
     to_list/1,
     info_fields/0,
     get_cachehit_info/2,
+    render_system_sections/1,
     render_sys_info/1,
     render_sys_info/4,
     render_cache_hit_rates/2,
@@ -50,9 +54,6 @@ start(#view_opts{sys = #system{interval = Interval}} = ViewOpts) ->
     end),
     manager(Pid, ViewOpts).
 
--spec clean(list()) -> ok.
-clean(Pids) -> observer_cli_lib:exit_processes(Pids).
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -69,28 +70,11 @@ manager(Pid, #view_opts{sys = AllocatorOpts} = ViewOpts) ->
     end.
 
 render_worker(Cmd, Interval, LastTimeRef) ->
-    CacheHitInfo = recon_alloc:cache_hit_rates(),
-    AverageBlockCurs = recon_alloc:average_block_sizes(current),
-    AverageBlockMaxes = recon_alloc:average_block_sizes(max),
-    SbcsToMbcsCurs = observer_cli_lib:sbcs_to_mbcs(
-        ?UTIL_ALLOCATORS,
-        recon_alloc:sbcs_to_mbcs(current)
-    ),
-    SbcsToMbcsMaxs = observer_cli_lib:sbcs_to_mbcs(?UTIL_ALLOCATORS, recon_alloc:sbcs_to_mbcs(max)),
-    Sys = render_sys_info(Cmd),
+    SystemInfo = collect_system_info(Cmd),
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
-    Menu = observer_cli_lib:render_menu(allocator, Text),
-    BlockView = render_block_size_info(
-        AverageBlockCurs,
-        AverageBlockMaxes,
-        SbcsToMbcsCurs,
-        SbcsToMbcsMaxs
-    ),
-    DistNodesInfo = get_dist_nodes_info(),
-    DistNodeView = render_dist_node_info(DistNodesInfo),
-    HitView = render_cache_hit_rates(CacheHitInfo, erlang:length(CacheHitInfo)),
-    LastLine = observer_cli_lib:render_last_line("q(quit)"),
-    ?output([?CURSOR_TOP, Menu, Sys, BlockView, DistNodeView, HitView, LastLine]),
+    Menu = observer_cli_lib:render_top_menu(allocator, Text),
+    LastLine = observer_cli_lib:render_footer("q(quit)"),
+    ?output([?CURSOR_TOP, Menu] ++ render_system_sections(SystemInfo) ++ [LastLine]),
     NextTimeRef = observer_cli_lib:next_redraw(LastTimeRef, Interval),
     receive
         quit -> quit;
@@ -98,16 +82,86 @@ render_worker(Cmd, Interval, LastTimeRef) ->
         redraw -> render_worker(Cmd, Interval, NextTimeRef)
     end.
 
-get_dist_nodes_info() ->
+collect_system_info(Cmd) ->
+    {OsProcessInfo, SysInfo} = split_os_process_info(collect_sys_info(Cmd)),
+    #{
+        os_process_info => OsProcessInfo,
+        sys_info => SysInfo,
+        allocator_info => collect_allocator_info(),
+        dist_nodes_info => collect_distribution_info()
+    }.
+
+split_os_process_info(SysInfo) ->
+    lists:partition(
+        fun({Key, _}) -> lists:member(Key, [ps_cpu, ps_mem, ps_rss, ps_vsz]) end,
+        SysInfo
+    ).
+
+collect_allocator_info() ->
+    #{
+        cache_hit_info => recon_alloc:cache_hit_rates(),
+        average_block_curs => recon_alloc:average_block_sizes(current),
+        average_block_maxes => recon_alloc:average_block_sizes(max),
+        sbcs_to_mbcs_curs =>
+            observer_cli_lib:sbcs_to_mbcs(?UTIL_ALLOCATORS, recon_alloc:sbcs_to_mbcs(current)),
+        sbcs_to_mbcs_maxes =>
+            observer_cli_lib:sbcs_to_mbcs(?UTIL_ALLOCATORS, recon_alloc:sbcs_to_mbcs(max))
+    }.
+
+render_system_sections(SystemInfo) ->
+    [
+        render_system_info_section(SystemInfo),
+        render_allocator_section(SystemInfo),
+        render_distribution_node_section(SystemInfo),
+        render_cache_hit_section(SystemInfo)
+    ].
+
+render_system_info_section(#{os_process_info := OsProcessInfo, sys_info := SysInfo}) ->
+    render_sys_info(OsProcessInfo ++ SysInfo).
+
+render_allocator_section(#{
+    allocator_info := #{
+        average_block_curs := AverageBlockCurs,
+        average_block_maxes := AverageBlockMaxes,
+        sbcs_to_mbcs_curs := SbcsToMbcsCurs,
+        sbcs_to_mbcs_maxes := SbcsToMbcsMaxs
+    }
+}) ->
+    render_block_size_info(
+        AverageBlockCurs,
+        AverageBlockMaxes,
+        SbcsToMbcsCurs,
+        SbcsToMbcsMaxs
+    ).
+
+render_distribution_node_section(#{dist_nodes_info := DistNodesInfo}) ->
+    render_dist_node_info(DistNodesInfo).
+
+render_cache_hit_section(#{allocator_info := #{cache_hit_info := CacheHitInfo}}) ->
+    render_cache_hit_rates(CacheHitInfo, erlang:length(CacheHitInfo)).
+
+collect_distribution_info() ->
     case ets:info(sys_dist, size) of
         undefined ->
             [];
         0 ->
             [];
         _ ->
+            Limit = erlang:system_info(dist_buf_busy_limit),
             {ok, DistNodesInfo} = net_kernel:nodes_info(),
-            DistNodesInfo
+            [collect_distribution_node_info(DistNodeInfo, Limit) || DistNodeInfo <- DistNodesInfo]
     end.
+
+collect_distribution_node_info({Node, Info}, Limit) ->
+    {Node, #{
+        queue_size => get_dist_queue_size(Node),
+        queue_limit => Limit,
+        address => get_address(Info),
+        in => proplists:get_value(in, Info),
+        out => proplists:get_value(out, Info),
+        type => proplists:get_value(type, Info),
+        state => proplists:get_value(state, Info)
+    }}.
 
 render_dist_node_info([]) ->
     [];
@@ -125,18 +179,17 @@ render_dist_node_info(DistNodesInfo) ->
         ?W("Type", TypeW),
         ?W("State", StateW)
     ]),
-    Limit = erlang:system_info(dist_buf_busy_limit),
-    LimitStr = integer_to_list(Limit),
     View = lists:map(
         fun({Node, Info}) ->
-            State = proplists:get_value(state, Info),
-            Type = proplists:get_value(type, Info),
-            Address = get_address(Info),
-            In = proplists:get_value(in, Info),
-            Out = proplists:get_value(out, Info),
-            QueueSize = get_dist_queue_size(Node),
+            State = maps:get(state, Info),
+            Type = maps:get(type, Info),
+            Address = maps:get(address, Info),
+            In = maps:get(in, Info),
+            Out = maps:get(out, Info),
+            QueueSize = maps:get(queue_size, Info),
+            Limit = maps:get(queue_limit, Info),
             QueueSizeStr = observer_cli_lib:to_list(QueueSize),
-            QueueSizeLimitStr = QueueSizeStr ++ "/" ++ LimitStr,
+            QueueSizeLimitStr = QueueSizeStr ++ "/" ++ integer_to_list(Limit),
             Percent =
                 case is_integer(QueueSize) of
                     true ->
@@ -340,8 +393,7 @@ get_alloc(Key, Curs, Maxes, STMCurs, STMMaxes) ->
         proplists:get_value(Key, STMMaxes)
     ].
 
-render_sys_info(Cmd) ->
-    SysInfo = sys_info(Cmd),
+render_sys_info(SysInfo) ->
     {Info, Stat} = info_fields(),
     SystemAndCPU = fill_info(Info, SysInfo),
     MemAndStatistics = fill_info(Stat, SysInfo),
@@ -350,6 +402,9 @@ render_sys_info(Cmd) ->
     {_, _, Memory} = lists:keyfind("Memory Usage", 1, MemAndStatistics),
     {_, _, Statistics} = lists:keyfind("Statistics", 1, MemAndStatistics),
     render_sys_info(System, CPU, Memory, Statistics).
+
+collect_sys_info(Cmd) ->
+    collect_os_process_info(Cmd) ++ collect_runtime_info().
 
 render_sys_info(System, CPU, Memory, Statistics) ->
     [
@@ -442,7 +497,22 @@ sys_info_row_widths() ->
 compiled_for_widths() ->
     observer_cli_lib:weighted_widths([22, 111], [0, 1]).
 
-sys_info(Cmd) ->
+collect_os_process_info(Cmd) ->
+    [_, CmdValue | _] = string:split(os:cmd(Cmd), "\n", all),
+    [CpuPsV, MemPsV, RssPsV, VszPsV] =
+        case lists:filter(fun(Y) -> Y =/= [] end, string:split(CmdValue, " ", all)) of
+            [] -> ["--", "--", "--", "--"];
+            [V1, V2, V3, V4] -> [V1, V2, list_to_integer(V3) * 1024, list_to_integer(V4) * 1024]
+        end,
+
+    [
+        {ps_cpu, CpuPsV ++ "%"},
+        {ps_mem, MemPsV ++ "%"},
+        {ps_rss, RssPsV},
+        {ps_vsz, VszPsV}
+    ].
+
+collect_runtime_info() ->
     MemInfo =
         try erlang:memory() of
             Mem -> Mem
@@ -456,19 +526,8 @@ sys_info(Cmd) ->
             enabled -> SchedulersOnline;
             _ -> 1
         end,
-    [_, CmdValue | _] = string:split(os:cmd(Cmd), "\n", all),
-    [CpuPsV, MemPsV, RssPsV, VszPsV] =
-        case lists:filter(fun(Y) -> Y =/= [] end, string:split(CmdValue, " ", all)) of
-            [] -> ["--", "--", "--", "--"];
-            [V1, V2, V3, V4] -> [V1, V2, list_to_integer(V3) * 1024, list_to_integer(V4) * 1024]
-        end,
-
     {{_, Input}, {_, Output}} = erlang:statistics(io),
     [
-        {ps_cpu, CpuPsV ++ "%"},
-        {ps_mem, MemPsV ++ "%"},
-        {ps_rss, RssPsV},
-        {ps_vsz, VszPsV},
         {io_input, Input},
         {io_output, Output},
 

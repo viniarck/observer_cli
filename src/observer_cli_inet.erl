@@ -5,7 +5,6 @@
 
 %% API
 -export([start/1]).
--export([clean/1]).
 
 -ifdef(TEST).
 -export([
@@ -14,7 +13,11 @@
     get_menu_str/4,
     title/3,
     add_choose_color/3,
+    collect_io_info/1,
+    collect_inet_info/5,
+    collect_inet_render_info/3,
     render_inet_rows/3,
+    render_io_info/1,
     render_io_rows/1,
     inet_info/5,
     getstat/2,
@@ -40,9 +43,6 @@ start(#view_opts{inet = InetOpt, auto_row = AutoRow} = ViewOpts) ->
     ),
     manager(StorePid, RenderPid, ViewOpts).
 
--spec clean(list()) -> ok.
-clean(Pids) -> observer_cli_lib:exit_processes(Pids).
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -57,8 +57,7 @@ manager(StorePid, RenderPid, ViewOpts = #view_opts{inet = InetOpts}) ->
             NewInet = InetOpts#inet{interval = NewInterval},
             manager(StorePid, RenderPid, ViewOpts#view_opts{inet = NewInet});
         Func when Func =:= inet_count; Func =:= inet_window ->
-            clean([StorePid, RenderPid]),
-            start(ViewOpts#view_opts{inet = InetOpts#inet{func = Func}});
+            restart(StorePid, RenderPid, ViewOpts#view_opts{inet = InetOpts#inet{func = Func}});
         Type when
             Type =:= recv_cnt;
             Type =:= recv_oct;
@@ -67,8 +66,7 @@ manager(StorePid, RenderPid, ViewOpts = #view_opts{inet = InetOpts}) ->
             Type =:= cnt;
             Type =:= oct
         ->
-            clean([StorePid, RenderPid]),
-            start(ViewOpts#view_opts{inet = InetOpts#inet{type = Type}});
+            restart(StorePid, RenderPid, ViewOpts#view_opts{inet = InetOpts#inet{type = Type}});
         {jump, NewPos} ->
             NewPages = observer_cli_lib:update_page_pos(CurPage, NewPos, Pages),
             NewInetOpts = InetOpts#inet{pages = NewPages},
@@ -76,30 +74,45 @@ manager(StorePid, RenderPid, ViewOpts = #view_opts{inet = InetOpts}) ->
         jump ->
             start_port_view(StorePid, RenderPid, ViewOpts, true);
         page_down_top_n ->
-            NewPage = max(CurPage + 1, 1),
-            NewPages = observer_cli_lib:update_page_pos(StorePid, NewPage, Pages),
-            clean([StorePid, RenderPid]),
-            start(ViewOpts#view_opts{inet = InetOpts#inet{cur_page = NewPage, pages = NewPages}});
+            restart_page(StorePid, RenderPid, ViewOpts, CurPage, 1);
         page_up_top_n ->
-            NewPage = max(CurPage - 1, 1),
-            NewPages = observer_cli_lib:update_page_pos(StorePid, NewPage, Pages),
-            clean([StorePid, RenderPid]),
-            start(ViewOpts#view_opts{inet = InetOpts#inet{cur_page = NewPage, pages = NewPages}});
+            restart_page(StorePid, RenderPid, ViewOpts, CurPage, -1);
         _ ->
             manager(StorePid, RenderPid, ViewOpts)
     end.
+
+restart_page(
+    StorePid,
+    RenderPid,
+    ViewOpts = #view_opts{inet = InetOpts = #inet{pages = Pages}},
+    CurPage,
+    Delta
+) ->
+    NewPage = observer_cli_lib:next_page(CurPage, Delta),
+    NewPages = observer_cli_lib:update_page_pos(StorePid, NewPage, Pages),
+    restart(StorePid, RenderPid, ViewOpts#view_opts{
+        inet = InetOpts#inet{
+            cur_page = NewPage, pages = NewPages
+        }
+    }).
+
+restart(StorePid, RenderPid, ViewOpts) ->
+    observer_cli_lib:exit_processes([StorePid, RenderPid]),
+    start(ViewOpts).
 
 render_worker(StorePid, InetOpt, LastTimeRef, Count, LastIO, AutoRow) ->
     #inet{func = Function, type = Type, interval = Interval, cur_page = CurPage} = InetOpt,
     TerminalRow = observer_cli_lib:get_terminal_rows(AutoRow),
     Row = erlang:max(TerminalRow - 5, 0),
     Text = get_menu_str(Function, Type, Interval, Row),
-    Menu = observer_cli_lib:render_menu(inet, Text),
+    Menu = observer_cli_lib:render_top_menu(inet, Text),
     TopLen = Row * CurPage,
-    InetList = inet_info(Function, Type, TopLen, Interval, Count),
-    {IORows, NewIO} = render_io_rows(LastIO),
-    {PortList, InetRows} = render_inet_rows(InetList, TopLen, InetOpt),
-    LastLine = observer_cli_lib:render_last_line(?LAST_LINE),
+    InetList = collect_inet_info(Function, Type, TopLen, Interval, Count),
+    {IOInfo, NewIO} = collect_io_info(LastIO),
+    IORows = render_io_info(IOInfo),
+    InetInfo = collect_inet_render_info(InetList, TopLen, InetOpt),
+    {PortList, InetRows} = render_inet_rows(InetInfo, TopLen, InetOpt),
+    LastLine = observer_cli_lib:render_footer(?LAST_LINE),
     ?output([?CURSOR_TOP, Menu, IORows, InetRows, LastLine]),
     observer_cli_store:update(StorePid, Row, PortList),
     NewInterval =
@@ -125,8 +138,24 @@ render_worker(StorePid, InetOpt, LastTimeRef, Count, LastIO, AutoRow) ->
             render_worker(StorePid, InetOpt, TimeRef, Count + 1, NewIO, AutoRow)
     end.
 
-render_io_rows({LastIn, LastOut}) ->
+collect_io_info({LastIn, LastOut}) ->
     {{input, In}, {output, Out}} = erlang:statistics(io),
+    {
+        #{
+            input_delta => In - LastIn,
+            output_delta => Out - LastOut,
+            total_input => In,
+            total_output => Out
+        },
+        {In, Out}
+    }.
+
+render_io_info(#{
+    input_delta := InputDelta,
+    output_delta := OutputDelta,
+    total_input := In,
+    total_output := Out
+}) ->
     [
         ByteInputW,
         InputDeltaW,
@@ -137,19 +166,74 @@ render_io_rows({LastIn, LastOut}) ->
         TotalOutputW,
         TotalOutW
     ] = io_widths(),
-    {
-        ?render([
-            ?YELLOW,
-            ?W("Byte Input", ByteInputW),
-            ?W({byte, In - LastIn}, InputDeltaW),
-            ?W("Byte Output", ByteOutputW),
-            ?W({byte, Out - LastOut}, OutputDeltaW),
-            ?W("Total Input", TotalInputW),
-            ?W({byte, In}, TotalInW),
-            ?W("Total Output", TotalOutputW),
-            ?W({byte, Out}, TotalOutW)
-        ]),
-        {In, Out}
+    ?render([
+        ?YELLOW,
+        ?W("Byte Input", ByteInputW),
+        ?W({byte, InputDelta}, InputDeltaW),
+        ?W("Byte Output", ByteOutputW),
+        ?W({byte, OutputDelta}, OutputDeltaW),
+        ?W("Total Input", TotalInputW),
+        ?W({byte, In}, TotalInW),
+        ?W("Total Output", TotalOutputW),
+        ?W({byte, Out}, TotalOutW)
+    ]).
+
+-ifdef(TEST).
+render_io_rows(LastIO) ->
+    {IOInfo, NewIO} = collect_io_info(LastIO),
+    {render_io_info(IOInfo), NewIO}.
+-endif.
+
+collect_inet_render_info([], _Num, _InetOpt) ->
+    [];
+collect_inet_render_info(InetList, Num, #inet{
+    type = Type,
+    pages = Pages,
+    cur_page = Page
+}) ->
+    {Start, ChoosePos} = observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(InetList)),
+    Rows = lists:sublist(InetList, Start, Num),
+    collect_inet_rows(Type, Rows, Start, ChoosePos).
+
+collect_inet_rows(Type, Rows, Start, ChoosePos) ->
+    {_, Collected} =
+        lists:foldl(
+            fun(Item, {Pos, Acc}) ->
+                {Pos + 1, [collect_inet_row(Type, Item, Pos, ChoosePos) | Acc]}
+            end,
+            {Start, []},
+            Rows
+        ),
+    lists:reverse(Collected).
+
+collect_inet_row(Type, Item, Pos, ChoosePos) when Type =:= cnt orelse Type =:= oct ->
+    {Port, Value, [{_, Type1Value}, {_, Type2Value}]} = Item,
+    collect_inet_row(Port, Value, Type1Value, Type2Value, Pos, ChoosePos);
+collect_inet_row(Type, {Port, Value, _}, Pos, ChoosePos) ->
+    {_, Type1, _} = trans_type(Type),
+    Packet1 = getstat(Port, erlang:list_to_existing_atom(Type1)),
+    AllPacket =
+        case is_integer(Packet1) of
+            true -> Value + Packet1;
+            false -> Value
+        end,
+    collect_inet_row(Port, Value, Packet1, AllPacket, Pos, ChoosePos).
+
+collect_inet_row(Port, Value, Type1Value, Type2Value, Pos, ChoosePos) ->
+    {memory_used, MemoryUsed} = recon:port_info(Port, memory_used),
+    {io, IO} = recon:port_info(Port, io),
+    #{
+        pos => Pos,
+        choose_pos => ChoosePos,
+        port => Port,
+        value => Value,
+        type1 => Type1Value,
+        type2 => Type2Value,
+        input => proplists:get_value(input, IO),
+        output => proplists:get_value(output, IO),
+        queue_size => proplists:get_value(queue_size, MemoryUsed),
+        memory => proplists:get_value(memory, MemoryUsed),
+        peer => get_remote_ip(Port)
     }.
 
 render_inet_rows([], Rows, #inet{func = inet_count, type = Type}) ->
@@ -163,25 +247,25 @@ render_inet_rows([], Rows, #inet{func = inet_window, type = Type, interval = Int
             Interval
         ])
     };
-render_inet_rows(InetList, Num, #inet{
-    type = Type,
-    pages = Pages,
-    cur_page = Page
-}) when Type =:= cnt orelse Type =:= oct ->
+render_inet_rows(InetList, _Num, #inet{type = Type}) when Type =:= cnt orelse Type =:= oct ->
     {Unit, RecvType, SendType} = trans_type(Type),
     Title = title(Type, RecvType, SendType),
     [NoW, PortW, ValueW, RecvW, SendW, OutputW, InputW, QueueW, MemoryW, PeerW] =
         inet_widths(),
-    {Start, ChoosePos} = observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(InetList)),
-    FormatFunc = fun(Item, {Acc, Acc1, Pos}) ->
-        {Port, Value, [{_, Recv}, {_, Send}]} = Item,
-        {memory_used, MemoryUsed} = recon:port_info(Port, memory_used),
-        {io, IO} = recon:port_info(Port, io),
-        Input = proplists:get_value(input, IO),
-        Output = proplists:get_value(output, IO),
-        QueueSize = proplists:get_value(queue_size, MemoryUsed),
-        Memory = proplists:get_value(memory, MemoryUsed),
-        IP = get_remote_ip(Port),
+    FormatFunc = fun(Item, {Acc, Acc1}) ->
+        #{
+            pos := Pos,
+            choose_pos := ChoosePos,
+            port := Port,
+            value := Value,
+            type1 := Recv,
+            type2 := Send,
+            input := Input,
+            output := Output,
+            queue_size := QueueSize,
+            memory := Memory,
+            peer := IP
+        } = Item,
         {ValueFormat, RecvFormat, SendFormat} = trans_format(
             Unit, Value, Recv, Send, [ValueW, RecvW, SendW]
         ),
@@ -198,35 +282,33 @@ render_inet_rows(InetList, Num, #inet{
             ?W(IP, PeerW)
         ],
         Rows = add_choose_color(ChoosePos, Pos, R),
-        {[?render(Rows) | Acc], [{Pos, Port} | Acc1], Pos + 1}
+        {[?render(Rows) | Acc], [{Pos, Port} | Acc1]}
     end,
-    {Rows, PortList, _} = lists:foldl(
+    {Rows, PortList} = lists:foldl(
         FormatFunc,
-        {[], [], Start},
-        lists:sublist(InetList, Start, Num)
+        {[], []},
+        InetList
     ),
     {PortList, [Title | lists:reverse(Rows)]};
-render_inet_rows(InetList, Num, #inet{type = Type, pages = Pages, cur_page = Page}) ->
+render_inet_rows(InetList, _Num, #inet{type = Type}) ->
     {Unit, Type1, Type2} = trans_type(Type),
     Title = title(Type, Type1, Type2),
     [NoW, PortW, ValueW, Type1W, Type2W, OutputW, InputW, QueueW, MemoryW, PeerW] =
         inet_widths(),
-    {Start, ChoosePos} = observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(InetList)),
-    FormatFunc = fun(Item, {Acc, Acc1, Pos}) ->
-        {Port, Value, _} = Item,
-        {memory_used, MemoryUsed} = recon:port_info(Port, memory_used),
-        {io, IO} = recon:port_info(Port, io),
-        Input = proplists:get_value(input, IO),
-        Output = proplists:get_value(output, IO),
-        QueueSize = proplists:get_value(queue_size, MemoryUsed),
-        Memory = proplists:get_value(memory, MemoryUsed),
-        IP = get_remote_ip(Port),
-        Packet1 = getstat(Port, erlang:list_to_existing_atom(Type1)),
-        AllPacket =
-            case is_integer(Packet1) of
-                true -> Value + Packet1;
-                false -> Value
-            end,
+    FormatFunc = fun(Item, {Acc, Acc1}) ->
+        #{
+            pos := Pos,
+            choose_pos := ChoosePos,
+            port := Port,
+            value := Value,
+            type1 := Packet1,
+            type2 := AllPacket,
+            input := Input,
+            output := Output,
+            queue_size := QueueSize,
+            memory := Memory,
+            peer := IP
+        } = Item,
         {ValueFormat, Packet1Format, AllFormat} = trans_format(
             Unit, Value, Packet1, AllPacket, [ValueW, Type1W, Type2W]
         ),
@@ -243,12 +325,12 @@ render_inet_rows(InetList, Num, #inet{type = Type, pages = Pages, cur_page = Pag
             ?W(IP, PeerW)
         ],
         Rows = add_choose_color(ChoosePos, Pos, R),
-        {[?render(Rows) | Acc], [{Pos, Port} | Acc1], Pos + 1}
+        {[?render(Rows) | Acc], [{Pos, Port} | Acc1]}
     end,
-    {Rows, PortList, _} = lists:foldl(
+    {Rows, PortList} = lists:foldl(
         FormatFunc,
-        {[], [], Start},
-        lists:sublist(InetList, Start, Num)
+        {[], []},
+        InetList
     ),
     {PortList, [Title | lists:reverse(Rows)]}.
 
@@ -256,6 +338,9 @@ get_menu_str(inet_count, Type, Interval, Rows) ->
     io_lib:format("recon:inet_count(~p, ~w) Interval:~wms", [Type, Rows, Interval]);
 get_menu_str(inet_window, Type, Interval, Rows) ->
     io_lib:format("recon:inet_window(~p, ~w, ~w) Interval:~wms", [Type, Rows, Interval, Interval]).
+
+collect_inet_info(Function, Type, Num, Ms, Count) ->
+    inet_info(Function, Type, Num, Ms, Count).
 
 inet_info(inet_count, Type, Num, _, _) -> recon:inet_count(Type, Num);
 inet_info(inet_window, Type, Num, _, 0) -> recon:inet_count(Type, Num);
@@ -272,10 +357,10 @@ start_port_view(StorePid, RenderPid, Opts = #view_opts{inet = InetOpt}, AutoJump
     {_, CurPos} = lists:keyfind(CurPage, 1, Pages),
     case observer_cli_store:lookup_pos(StorePid, CurPos) of
         {CurPos, ChoosePort} ->
-            clean([StorePid, RenderPid]),
+            observer_cli_lib:exit_processes([StorePid, RenderPid]),
             observer_cli_port:start(ChoosePort, Opts);
         {_, ChoosePort} when AutoJump ->
-            clean([StorePid, RenderPid]),
+            observer_cli_lib:exit_processes([StorePid, RenderPid]),
             observer_cli_port:start(ChoosePort, Opts);
         _ ->
             manager(StorePid, RenderPid, Opts)

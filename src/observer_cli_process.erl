@@ -4,7 +4,11 @@
 
 -dialyzer([
     {nowarn_function, [
-        render_worker/8, render_reduction_memory/4, get_chart_format/1, chart_format/2
+        render_worker/8,
+        render_process_sections/3,
+        render_reduction_memory/4,
+        get_chart_format/1,
+        chart_format/2
     ]}
 ]).
 
@@ -13,16 +17,28 @@
 -ifdef(TEST).
 -export([
     parse_cmd_str/1,
+    collect_process_info/1,
+    collect_process_messages/1,
+    collect_process_dictionary/1,
+    collect_process_stack/1,
+    collect_process_state/1,
     chart_format/2,
     replace_first_line/2,
+    render_process_sections/3,
     render_process_info/1,
+    render_process_messages/1,
+    render_process_dictionary/1,
+    render_process_stack/1,
+    render_process_state/2,
+    render_stateless_view/4,
     render_link_monitor/3,
     render_reduction_memory/4,
     render_menu/3,
-    render_last_line/0,
+    render_footer/0,
     state_footer_text/1,
     render_worker/8,
     render_state/3,
+    output_die_view/3,
     state_nav/1,
     state_title/1,
     state_footer/2,
@@ -69,20 +85,25 @@ handle_action(
     NewOpt = Opts#view_opts{process = ProcOpts#process{interval = NewInterval}},
     manager(RenderPid, Type, Pid, NewOpt);
 handle_action(home, RenderPid, _Type, _Pid, Opts) ->
-    erlang:exit(RenderPid, stop),
-    observer_cli:start(Opts);
+    open_home(RenderPid, Opts);
 handle_action(back, RenderPid, home, _Pid, Opts) ->
-    erlang:exit(RenderPid, stop),
-    observer_cli:start(Opts);
+    open_home(RenderPid, Opts);
 handle_action(back, RenderPid, plugin, _Pid, Opts) ->
-    erlang:exit(RenderPid, stop),
-    observer_cli_plugin:start(Opts);
+    open_plugin(RenderPid, Opts);
 handle_action(state_view, RenderPid, Type, Pid, Opts) ->
     erlang:send(RenderPid, state_view),
     wait_for_state_view(RenderPid, Type, Pid, Opts);
 handle_action(ViewAction, RenderPid, Type, Pid, Opts) ->
     erlang:send(RenderPid, ViewAction),
     manager(RenderPid, Type, Pid, Opts).
+
+open_plugin(RenderPid, Opts) ->
+    erlang:exit(RenderPid, stop),
+    observer_cli_plugin:start(Opts).
+
+open_home(RenderPid, Opts) ->
+    erlang:exit(RenderPid, stop),
+    observer_cli:start(Opts).
 
 wait_for_state_view(RenderPid, Type, Pid, Opts) ->
     receive
@@ -95,12 +116,110 @@ wait_for_state_view(RenderPid, Type, Pid, Opts) ->
     end.
 
 render_worker(info, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
+    case collect_process_info(Pid) of
+        dead ->
+            output_die_view(Pid, Type, Interval),
+            next_draw_view(info, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+        ProcessInfo ->
+            {NewRedQ, NewMemQ, Lines} = render_process_sections(ProcessInfo, RedQ, MemQ),
+            Menu = render_menu(info, Type, Interval),
+            LastLine = render_footer(),
+            ?output([?CURSOR_TOP, Menu, Lines, LastLine]),
+            next_draw_view(info, Type, TimeRef, Interval, Pid, NewRedQ, NewMemQ, ManagerPid)
+    end;
+render_worker(message, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
+    case collect_process_messages(Pid) of
+        {ok, MessagesInfo} ->
+            Line = render_process_messages(MessagesInfo),
+            ?output([?CURSOR_TOP, render_stateless_view(message, Type, Interval, Line)]),
+            next_draw_view(message, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+        dead ->
+            render_worker(
+                info,
+                Type,
+                Interval,
+                Pid,
+                ?INIT_TIME_REF,
+                ?INIT_QUEUE,
+                ?INIT_QUEUE,
+                ManagerPid
+            )
+    end;
+render_worker(dict, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
+    case collect_process_dictionary(Pid) of
+        {ok, DictionaryInfo} ->
+            Line = render_process_dictionary(DictionaryInfo),
+            ?output([?CURSOR_TOP, render_stateless_view(dict, Type, Interval, Line)]),
+            next_draw_view(dict, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+        dead ->
+            render_worker(
+                info,
+                Type,
+                Interval,
+                Pid,
+                ?INIT_TIME_REF,
+                ?INIT_QUEUE,
+                ?INIT_QUEUE,
+                ManagerPid
+            )
+    end;
+render_worker(stack, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
+    case collect_process_stack(Pid) of
+        {ok, #{pid := Pid, stack := Stack}} ->
+            Prompt = io_lib:format("erlang:process_info(~p, current_stacktrace).      ~n", [Pid]),
+            Line = [Prompt, render_process_stack(Stack)],
+            ?output([?CURSOR_TOP, render_stateless_view(stack, Type, Interval, Line)]),
+            next_draw_view(stack, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+        dead ->
+            render_worker(
+                info,
+                Type,
+                Interval,
+                Pid,
+                ?INIT_TIME_REF,
+                ?INIT_QUEUE,
+                ?INIT_QUEUE,
+                ManagerPid
+            )
+    end;
+render_worker(state, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
+    Result = render_state(Pid, Type, Interval),
+    erlang:send(ManagerPid, {state_view_done, Result}),
+    case Result of
+        {ok, _Action} ->
+            next_draw_view(state, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+        error ->
+            next_draw_view_2(state, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid)
+    end.
+
+render_process_sections(
+    #{
+        process := ProcessView,
+        links := Link,
+        monitors := Monitors,
+        monitored_by := MonitoredBy,
+        reductions := Reductions,
+        memory := Memory
+    },
+    RedQ,
+    MemQ
+) ->
+    ProcessSection = render_process_info(ProcessView),
+    LinkSection = render_link_monitor(Link, Monitors, MonitoredBy),
+    {NewRedQ, NewMemQ, ReductionSection} = render_reduction_memory(Reductions, Memory, RedQ, MemQ),
+    {NewRedQ, NewMemQ, [ProcessSection, LinkSection, ReductionSection]}.
+
+render_stateless_view(View, Type, Interval, Line) ->
+    Menu = render_menu(View, Type, Interval),
+    LastLine = render_footer(),
+    [Menu, Line, LastLine].
+
+collect_process_info(Pid) ->
     ProcessInfo = recon:info(Pid),
     Meta = proplists:get_value(meta, ProcessInfo),
     case Meta of
         undefined ->
-            output_die_view(Pid, Type, Interval),
-            next_draw_view(info, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+            dead;
         _ ->
             WordSize = erlang:system_info(wordsize),
 
@@ -122,12 +241,12 @@ render_worker(info, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
             MessageQueueLen = proplists:get_value(message_queue_len, MemoryUsed),
             HeapSize = proplists:get_value(heap_size, MemoryUsed, 0) * WordSize,
             TotalHeapSize = proplists:get_value(total_heap_size, MemoryUsed, 0) * WordSize,
-            GarbageCollection = proplists:get_value(garbage_collection, MemoryUsed),
+            GarbageCollection = collect_process_gc(
+                proplists:get_value(garbage_collection, MemoryUsed)
+            ),
 
             Work = proplists:get_value(work, ProcessInfo),
             Reductions = proplists:get_value(reductions, Work),
-
-            Menu = render_menu(info, Type, Interval),
 
             ProcessView = #{
                 pid => Pid,
@@ -141,122 +260,100 @@ render_worker(info, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
                 total_heap_size => TotalHeapSize,
                 garbage_collection => GarbageCollection
             },
-            Line1 = render_process_info(ProcessView),
+            #{
+                process => ProcessView,
+                links => Link,
+                monitors => Monitors,
+                monitored_by => MonitoredBy,
+                reductions => Reductions,
+                memory => Memory
+            }
+    end.
 
-            Line2 = render_link_monitor(Link, Monitors, MonitoredBy),
+collect_process_gc(GarbageCollection) ->
+    #{
+        min_bin_vheap_size => proplists:get_value(min_bin_vheap_size, GarbageCollection),
+        min_heap_size => proplists:get_value(min_heap_size, GarbageCollection),
+        fullsweep_after => proplists:get_value(fullsweep_after, GarbageCollection),
+        minor_gcs => proplists:get_value(minor_gcs, GarbageCollection)
+    }.
 
-            {NewRedQ, NewMemQ, Line3} = render_reduction_memory(Reductions, Memory, RedQ, MemQ),
-
-            LastLine = render_last_line(),
-
-            ?output([?CURSOR_TOP, Menu, Line1, Line2, Line3, LastLine]),
-            next_draw_view(info, Type, TimeRef, Interval, Pid, NewRedQ, NewMemQ, ManagerPid)
-    end;
-render_worker(message, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
+collect_process_messages(Pid) ->
     case erlang:process_info(Pid, message_queue_len) of
+        {message_queue_len, Len} when Len =:= 0 ->
+            {ok, #{pid => Pid, message_queue_len => Len, messages => []}};
+        {message_queue_len, Len} when Len > 10000 ->
+            {ok, #{pid => Pid, message_queue_len => Len, too_many => true, messages => []}};
         {message_queue_len, Len} ->
-            Line =
-                if
-                    Len =:= 0 ->
-                        "\e[32;1mNo messages were found.\e[0m\n";
-                    Len > 10000 ->
-                        io_lib:format("\e[31mToo many message(~w)!\e[0m~n", [Len]);
-                    true ->
-                        {messages, Messages} = recon:info(Pid, messages),
-                        [
-                            io_lib:format("~p Message Len:~p~n", [Pid, Len]),
-                            truncate_str(Pid, Messages)
-                        ]
-                end,
-            Menu = render_menu(message, Type, Interval),
-            LastLine = render_last_line(),
-            ?output([?CURSOR_TOP, Menu, Line, LastLine]),
-            next_draw_view(message, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+            {messages, Messages} = recon:info(Pid, messages),
+            {ok, #{pid => Pid, message_queue_len => Len, messages => Messages}};
         undefined ->
-            render_worker(
-                info,
-                Type,
-                Interval,
-                Pid,
-                ?INIT_TIME_REF,
-                ?INIT_QUEUE,
-                ?INIT_QUEUE,
-                ManagerPid
-            )
-    end;
-render_worker(dict, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
+            dead
+    end.
+
+render_process_messages(#{message_queue_len := 0}) ->
+    "\e[32;1mNo messages were found.\e[0m\n";
+render_process_messages(#{message_queue_len := Len, too_many := true}) ->
+    io_lib:format("\e[31mToo many message(~w)!\e[0m~n", [Len]);
+render_process_messages(#{pid := Pid, message_queue_len := Len, messages := Messages}) ->
+    [
+        io_lib:format("~p Message Len:~p~n", [Pid, Len]),
+        truncate_str(Pid, Messages)
+    ].
+
+collect_process_dictionary(Pid) ->
     case erlang:process_info(Pid, dictionary) of
         {dictionary, List} ->
-            Len = erlang:length(List),
-            Line1 = io_lib:format(
-                "erlang:process_info(~p, dictionary). dictionary_len:~p       ~n",
-                [Pid, Len]
-            ),
-            Line2 =
-                case Len of
-                    0 -> "\e[32;1mNo dictionary was found\e[0m\n";
-                    _ -> truncate_str(Pid, List)
-                end,
-            Menu = render_menu(dict, Type, Interval),
-            LastLine = render_last_line(),
-            ?output([?CURSOR_TOP, Menu, Line1, Line2, LastLine]),
-            next_draw_view(dict, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+            {ok, #{pid => Pid, dictionary => List}};
         undefined ->
-            render_worker(
-                info,
-                Type,
-                Interval,
-                Pid,
-                ?INIT_TIME_REF,
-                ?INIT_QUEUE,
-                ?INIT_QUEUE,
-                ManagerPid
-            )
-    end;
-render_worker(stack, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
+            dead
+    end.
+
+render_process_dictionary(#{pid := Pid, dictionary := List}) ->
+    Len = erlang:length(List),
+    Line1 = io_lib:format(
+        "erlang:process_info(~p, dictionary). dictionary_len:~p       ~n",
+        [Pid, Len]
+    ),
+    Line2 =
+        case Len of
+            0 -> "\e[32;1mNo dictionary was found\e[0m\n";
+            _ -> truncate_str(Pid, List)
+        end,
+    [Line1, Line2].
+
+collect_process_stack(Pid) ->
     case erlang:process_info(Pid, current_stacktrace) of
         {current_stacktrace, Stack} ->
-            Menu = render_menu(stack, Type, Interval),
-            Prompt = io_lib:format("erlang:process_info(~p, current_stacktrace).      ~n", [Pid]),
-            LastLine = render_last_line(),
-            {_, Line} =
-                lists:foldr(
-                    fun({Mod, Func, Arity, Location}, {Nth, Acc}) ->
-                        Mfa = observer_cli_lib:mfa_to_list({Mod, Func, Arity}),
-                        File = proplists:get_value(file, Location, "undefined"),
-                        Line = proplists:get_value(line, Location, 0),
-                        FileLine = File ++ ":" ++ erlang:integer_to_list(Line),
-                        case Nth =:= 1 of
-                            false -> {Nth + 1, [?W(Mfa, 66), ?W(FileLine, 62), ?NEW_LINE | Acc]};
-                            true -> {Nth + 1, [?W(Mfa, 66), ?W(FileLine, 62) | Acc]}
-                        end
-                    end,
-                    {1, []},
-                    lists:sublist(Stack, 30)
-                ),
-            ?output([?CURSOR_TOP, Menu, Prompt, ?render(Line), LastLine]),
-            next_draw_view(stack, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
+            {ok, #{pid => Pid, stack => Stack}};
         undefined ->
-            render_worker(
-                info,
-                Type,
-                Interval,
-                Pid,
-                ?INIT_TIME_REF,
-                ?INIT_QUEUE,
-                ?INIT_QUEUE,
-                ManagerPid
-            )
-    end;
-render_worker(state, Type, Interval, Pid, TimeRef, RedQ, MemQ, ManagerPid) ->
-    Result = render_state(Pid, Type, Interval),
-    erlang:send(ManagerPid, {state_view_done, Result}),
-    case Result of
-        {ok, _Action} ->
-            next_draw_view(state, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid);
-        error ->
-            next_draw_view_2(state, Type, TimeRef, Interval, Pid, RedQ, MemQ, ManagerPid)
+            dead
     end.
+
+render_process_stack(Stack) ->
+    {_, Line} =
+        lists:foldr(
+            fun({Mod, Func, Arity, Location}, {Nth, Acc}) ->
+                Mfa = observer_cli_lib:mfa_to_list({Mod, Func, Arity}),
+                File = proplists:get_value(file, Location, "undefined"),
+                LineNo = proplists:get_value(line, Location, 0),
+                FileLine = File ++ ":" ++ erlang:integer_to_list(LineNo),
+                case Nth =:= 1 of
+                    false -> {Nth + 1, [?W(Mfa, 66), ?W(FileLine, 62), ?NEW_LINE | Acc]};
+                    true -> {Nth + 1, [?W(Mfa, 66), ?W(FileLine, 62) | Acc]}
+                end
+            end,
+            {1, []},
+            lists:sublist(Stack, 30)
+        ),
+    ?render(Line).
+
+collect_process_state(Pid) ->
+    recon:get_state(Pid, 2500).
+
+render_process_state(Pid, State) ->
+    Line = truncate_str(Pid, State),
+    replace_first_line(Line, state_title(Pid)).
 
 %% state_view is static. user left state view and may stay long after. no need for redraw
 next_draw_view(state, Type, TimeRef, Interval, Pid, NewRedQ, NewMemQ, ManagerPid) ->
@@ -294,81 +391,124 @@ next_draw_view_2(Status, Type, TimeRef, Interval, Pid, NewRedQ, NewMemQ, Manager
             render_worker(Status, Type, Interval, Pid, TimeRef, NewRedQ, NewMemQ, ManagerPid)
     end.
 
-render_process_info(#{
+render_process_info(ProcessView) ->
+    Meta = process_meta_fields(ProcessView),
+    Memory = process_memory_fields(ProcessView),
+    GC = process_gc_fields(ProcessView),
+    Widths = process_info_widths([16, 42, 16, 12, 18, 12]),
+    [
+        render_process_info_title(Widths),
+        render_process_info_rows(Meta, Memory, GC, Widths)
+    ].
+
+process_meta_fields(#{
     pid := Pid,
     registered_name := RegisteredName,
     group_leader := GroupLeader,
     status := Status,
-    trap_exit := TrapExit,
-    initial_call := InitialCall,
-    message_queue_len := MessageQueueLen,
-    heap_size := HeapSize,
-    total_heap_size := TotalHeapSize,
-    garbage_collection := GarbageCollection
+    initial_call := InitialCall
 }) ->
-    MinBinVHeapSize = proplists:get_value(min_bin_vheap_size, GarbageCollection),
-    MinHeapSize = proplists:get_value(min_heap_size, GarbageCollection),
-    FullSweepAfter = proplists:get_value(fullsweep_after, GarbageCollection),
-    MinorGcs = integer_to_list(proplists:get_value(minor_gcs, GarbageCollection)),
-
-    InitialCallStr = observer_cli_lib:mfa_to_list(InitialCall),
-    GroupLeaderStr = erlang:pid_to_list(GroupLeader),
     PidStr = erlang:pid_to_list(Pid),
     Name =
         case RegisteredName of
             "" -> PidStr;
             _ -> PidStr ++ "/" ++ erlang:atom_to_list(RegisteredName)
         end,
-    MessageQueueLenStr = erlang:integer_to_list(MessageQueueLen),
+    #{
+        registered_name => Name,
+        initial_call => observer_cli_lib:mfa_to_list(InitialCall),
+        group_leader => erlang:pid_to_list(GroupLeader),
+        status => Status
+    }.
+
+process_memory_fields(#{
+    message_queue_len := MessageQueueLen,
+    heap_size := HeapSize,
+    total_heap_size := TotalHeapSize,
+    trap_exit := TrapExit
+}) ->
     MessageQueueLenColor =
         case MessageQueueLen > 0 of
             true -> ?RED;
             false -> ?GREEN
         end,
-    [MetaW, MetaValueW, MemoryW, MemoryValueW, GcW, GcValueW] =
-        process_info_widths([16, 42, 16, 12, 18, 12]),
+    #{
+        message_queue_len => {erlang:integer_to_list(MessageQueueLen), MessageQueueLenColor},
+        heap_size => HeapSize,
+        total_heap_size => TotalHeapSize,
+        trap_exit => TrapExit
+    }.
 
-    [
-        ?render([
-            ?GRAY_BG,
-            ?W("Meta", MetaW),
-            ?W("Value", MetaValueW),
-            ?W("Memory Used", MemoryW),
-            ?W("Value", MemoryValueW),
-            ?W("Garbage Collection", GcW),
-            ?W("Value", GcValueW)
-        ]),
-        ?render([
-            ?W("registered_name", MetaW),
-            ?W(Name, MetaValueW),
-            ?W("msg_queue_len", MemoryW),
-            ?W2(MessageQueueLenColor, MessageQueueLenStr, MemoryValueW + 1),
-            " ",
-            ?W("min_bin_vheap_size", GcW),
-            ?W({byte, MinBinVHeapSize}, GcValueW),
-            ?NEW_LINE,
-            ?W("initial_call", MetaW),
-            ?W(InitialCallStr, MetaValueW),
-            ?W("heap_size", MemoryW),
-            ?W({byte, HeapSize}, MemoryValueW),
-            ?W("min_heap_size", GcW),
-            ?W({byte, MinHeapSize}, GcValueW),
-            ?NEW_LINE,
-            ?W("group_leader", MetaW),
-            ?W(GroupLeaderStr, MetaValueW),
-            ?W("total_heap_size", MemoryW),
-            ?W({byte, TotalHeapSize}, MemoryValueW),
-            ?W("fullsweep_after", GcW),
-            ?W(FullSweepAfter, GcValueW),
-            ?NEW_LINE,
-            ?W("status", MetaW),
-            ?W(Status, MetaValueW),
-            ?W("trap_exit", MemoryW),
-            ?W(TrapExit, MemoryValueW),
-            ?W("minor_gcs", GcW),
-            ?W(MinorGcs, GcValueW)
-        ])
-    ].
+process_gc_fields(#{garbage_collection := GarbageCollection}) ->
+    #{
+        min_bin_vheap_size => maps:get(min_bin_vheap_size, GarbageCollection),
+        min_heap_size => maps:get(min_heap_size, GarbageCollection),
+        fullsweep_after => maps:get(fullsweep_after, GarbageCollection),
+        minor_gcs => integer_to_list(maps:get(minor_gcs, GarbageCollection))
+    }.
+
+render_process_info_title([MetaW, MetaValueW, MemoryW, MemoryValueW, GcW, GcValueW]) ->
+    ?render([
+        ?GRAY_BG,
+        ?W("Meta", MetaW),
+        ?W("Value", MetaValueW),
+        ?W("Memory Used", MemoryW),
+        ?W("Value", MemoryValueW),
+        ?W("Garbage Collection", GcW),
+        ?W("Value", GcValueW)
+    ]).
+
+render_process_info_rows(Meta, Memory, GC, [
+    MetaW, MetaValueW, MemoryW, MemoryValueW, GcW, GcValueW
+]) ->
+    #{
+        registered_name := Name,
+        initial_call := InitialCallStr,
+        group_leader := GroupLeaderStr,
+        status := Status
+    } = Meta,
+    #{
+        message_queue_len := {MessageQueueLenStr, MessageQueueLenColor},
+        heap_size := HeapSize,
+        total_heap_size := TotalHeapSize,
+        trap_exit := TrapExit
+    } = Memory,
+    #{
+        min_bin_vheap_size := MinBinVHeapSize,
+        min_heap_size := MinHeapSize,
+        fullsweep_after := FullSweepAfter,
+        minor_gcs := MinorGcs
+    } = GC,
+    ?render([
+        ?W("registered_name", MetaW),
+        ?W(Name, MetaValueW),
+        ?W("msg_queue_len", MemoryW),
+        ?W2(MessageQueueLenColor, MessageQueueLenStr, MemoryValueW + 1),
+        " ",
+        ?W("min_bin_vheap_size", GcW),
+        ?W({byte, MinBinVHeapSize}, GcValueW),
+        ?NEW_LINE,
+        ?W("initial_call", MetaW),
+        ?W(InitialCallStr, MetaValueW),
+        ?W("heap_size", MemoryW),
+        ?W({byte, HeapSize}, MemoryValueW),
+        ?W("min_heap_size", GcW),
+        ?W({byte, MinHeapSize}, GcValueW),
+        ?NEW_LINE,
+        ?W("group_leader", MetaW),
+        ?W(GroupLeaderStr, MetaValueW),
+        ?W("total_heap_size", MemoryW),
+        ?W({byte, TotalHeapSize}, MemoryValueW),
+        ?W("fullsweep_after", GcW),
+        ?W(FullSweepAfter, GcValueW),
+        ?NEW_LINE,
+        ?W("status", MetaW),
+        ?W(Status, MetaValueW),
+        ?W("trap_exit", MemoryW),
+        ?W(TrapExit, MemoryValueW),
+        ?W("minor_gcs", GcW),
+        ?W(MinorGcs, GcValueW)
+    ]).
 
 render_link_monitor(Link, Monitors, MonitoredBy) ->
     LinkStr = [
@@ -446,8 +586,8 @@ fill_last([Last], Amount) ->
 fill_last([Width | Rest], Amount) ->
     [Width | fill_last(Rest, Amount)].
 
-render_last_line() ->
-    observer_cli_lib:render_last_line("q(quit)").
+render_footer() ->
+    observer_cli_lib:render_footer("q(quit)").
 
 get_chart_format(Queue) ->
     List = queue:to_list(Queue),
@@ -466,8 +606,10 @@ render_menu(Type, Menu, Interval) ->
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
     Title = get_menu_title(Type, Menu),
     UpTime = observer_cli_lib:uptime(),
-    TitleWidth = ?COLUMN + 104 - erlang:length(UpTime) + observer_cli_lib:layout_extra_width(),
-    ?render([?W([Title | Text], TitleWidth) | UpTime]).
+    TitleWidth =
+        observer_cli_lib:layout_base_width() + 99 - erlang:length(UpTime) +
+            observer_cli_lib:layout_extra_width(),
+    observer_cli_lib:render_menu_header(Title, Text, TitleWidth).
 
 get_menu_title(Type, Menu) ->
     MenuStr =
@@ -475,63 +617,21 @@ get_menu_title(Type, Menu) ->
             home -> "Home(H)";
             plugin -> "Back(B)"
         end,
-    [Home, Process, Messages, Dict, Stack, State] = get_menu_title2(Type, MenuStr),
-    [Home, "|", Process, "|", Messages, "|", Dict, "|", Stack, "|", State, "|"].
-
-get_menu_title2(info, Menu) ->
-    [
-        ?UNSELECT(Menu),
-        ?SELECT("Process Info(P)"),
-        ?UNSELECT("Messages(M)"),
-        ?UNSELECT("Dictionary(D)"),
-        ?UNSELECT("Current Stack(C)"),
-        ?UNSELECT("State(S)")
-    ];
-get_menu_title2(message, Menu) ->
-    [
-        ?UNSELECT(Menu),
-        ?UNSELECT("Process Info(P)"),
-        ?SELECT("Messages(M)"),
-        ?UNSELECT("Dictionary(D)"),
-        ?UNSELECT("Current Stack(C)"),
-        ?UNSELECT("State(S)")
-    ];
-get_menu_title2(dict, Menu) ->
-    [
-        ?UNSELECT(Menu),
-        ?UNSELECT("Process Info(P)"),
-        ?UNSELECT("Messages(M)"),
-        ?SELECT("Dictionary(D)"),
-        ?UNSELECT("Current Stack(C)"),
-        ?UNSELECT("State(S)")
-    ];
-get_menu_title2(stack, Menu) ->
-    [
-        ?UNSELECT(Menu),
-        ?UNSELECT("Process Info(P)"),
-        ?UNSELECT("Messages(M)"),
-        ?UNSELECT("Dictionary(D)"),
-        ?SELECT("Current Stack(C)"),
-        ?UNSELECT("State(S)")
-    ];
-get_menu_title2(state, Menu) ->
-    [
-        ?UNSELECT(Menu),
-        ?UNSELECT("Process Info(P)"),
-        ?UNSELECT("Messages(M)"),
-        ?UNSELECT("Dictionary(D)"),
-        ?UNSELECT("Current Stack(C)"),
-        ?SELECT("State(S)")
-    ].
+    observer_cli_lib:menu_items(Type, [
+        {back, MenuStr},
+        {info, "Process Info(P)"},
+        {message, "Messages(M)"},
+        {dict, "Dictionary(D)"},
+        {stack, "Current Stack(C)"},
+        {state, "State(S)"}
+    ]).
 
 parse_cmd() ->
     parse_cmd_str(observer_cli_lib:to_list(io:get_line(""))).
 
 parse_cmd_str(Key) ->
     case Key of
-        "q\n" ->
-            quit;
-        "Q\n" ->
+        Cmd when Cmd =:= "q\n"; Cmd =:= "Q\n" ->
             quit;
         "P\n" ->
             info_view;
@@ -551,20 +651,24 @@ parse_cmd_str(Key) ->
         {error, _Reason} ->
             quit;
         Number ->
-            observer_cli_lib:parse_integer(Number)
+            observer_cli_command:parse_integer(Number)
     end.
 
 render_state(Pid, Type, Interval) ->
     Menu = render_menu(state, Type, Interval),
     PromptRes = io_lib:format("recon:get_state(~p, 2500).                            ~n", [Pid]),
-    PromptBefore = io_lib:format("\e[32;1mWaiting recon:get_state(~p, 2500) return...\e[0m~n", [Pid]),
-    LastLine = render_last_line(),
+    PromptBefore = [
+        observer_cli_lib:ansi_green(
+            io_lib:format("Waiting recon:get_state(~p, 2500) return...", [Pid])
+        ),
+        "\n"
+    ],
+    LastLine = render_footer(),
     ?output([?CURSOR_TOP, Menu, PromptBefore]),
     try
-        State = recon:get_state(Pid, 2500),
+        State = collect_process_state(Pid),
         Nav = state_nav(Type),
-        Line0 = truncate_str(Pid, State),
-        Line = replace_first_line(Line0, state_title(Pid)),
+        Line = render_process_state(Pid, State),
         Footer = state_footer(Menu, Nav),
         Action = print_with_less(Line, Menu, Nav, Footer),
         case Action of
@@ -591,8 +695,8 @@ log_render_state_error(Class, Reason, Stacktrace, Pid, Type, Interval) ->
 
 output_die_view(Pid, Type, Interval) ->
     Menu = render_menu(info, Type, Interval),
-    Line = io_lib:format("\e[31mProcess(~p) has already died.\e[0m~n", [Pid]),
-    LastLine = render_last_line(),
+    Line = [observer_cli_lib:ansi_red(io_lib:format("Process(~p) has already died.", [Pid])), "\n"],
+    LastLine = render_footer(),
     ?output([?CURSOR_TOP, Menu, Line, LastLine]).
 
 print_with_less(Input, Menu, Nav, Footer) ->
@@ -626,7 +730,7 @@ replace_first_line(Line, NewLine) ->
     end.
 
 state_footer(_Menu, Nav) ->
-    observer_cli_lib:render_last_line(state_footer_text(Nav)).
+    observer_cli_lib:render_footer(state_footer_text(Nav)).
 
 state_footer_text(_Nav) ->
     "q(quit)    F/B(page forward/back)".

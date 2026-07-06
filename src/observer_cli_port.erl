@@ -8,15 +8,19 @@
 -export([
     parse_cmd_str/1,
     addr_to_str/1,
-    render_last_line/0,
+    collect_port_info/1,
+    collect_port_type/1,
+    render_footer/0,
+    render_port_sections/1,
     render_port_info/1,
     render_link_monitor/2,
     render_type_line/1,
+    render_socket_peer/1,
     render_stats/1,
     render_opts/1,
     render_menu/2,
-    get_menu_title/1,
-    get_menu_title2/1
+    output_die_view/2,
+    get_menu_title/1
 ]).
 -endif.
 
@@ -33,61 +37,83 @@ start(Port, Opts) ->
 %%% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 manager(RenderPid, Opts) ->
-    case parse_cmd(Opts, RenderPid) of
-        quit ->
-            erlang:send(RenderPid, quit);
-        {new_interval, NewInterval} ->
-            erlang:send(RenderPid, {new_interval, NewInterval}),
-            manager(RenderPid, Opts#view_opts{port = NewInterval});
-        ViewAction ->
-            erlang:send(RenderPid, ViewAction),
-            manager(RenderPid, Opts)
-    end.
+    handle_action(parse_cmd(), RenderPid, Opts).
+
+handle_action(quit, RenderPid, _Opts) ->
+    erlang:send(RenderPid, quit);
+handle_action({new_interval, NewInterval}, RenderPid, Opts) ->
+    erlang:send(RenderPid, {new_interval, NewInterval}),
+    manager(RenderPid, Opts#view_opts{port = NewInterval});
+handle_action(home_view, RenderPid, Opts) ->
+    open_home(RenderPid, Opts);
+handle_action(net_view, RenderPid, Opts) ->
+    open_network(RenderPid, Opts);
+handle_action(ViewAction, RenderPid, Opts) ->
+    erlang:send(RenderPid, ViewAction),
+    manager(RenderPid, Opts).
+
+open_home(RenderPid, Opts) ->
+    erlang:exit(RenderPid, stop),
+    observer_cli:start(Opts).
+
+open_network(RenderPid, Opts) ->
+    erlang:exit(RenderPid, stop),
+    observer_cli_inet:start(Opts).
 
 render_worker(Port, Interval, TimeRef) ->
+    case collect_port_info(Port) of
+        dead ->
+            output_die_view(Port, Interval),
+            next_draw_view(TimeRef, Interval, Port);
+        PortDetail ->
+            Menu = render_menu(info, Interval),
+            Lines = render_port_sections(PortDetail),
+            LastLine = render_footer(),
+
+            ?output([?CURSOR_TOP, Menu, Lines, LastLine]),
+            next_draw_view(TimeRef, Interval, Port)
+    end.
+
+collect_port_info(Port) ->
     PortInfo = recon:port_info(Port),
     Meta = proplists:get_value(meta, PortInfo),
     case lists:member(undefined, Meta) of
         true ->
-            output_die_view(Port, Interval),
-            next_draw_view(TimeRef, Interval, Port);
+            dead;
         false ->
-            Id = proplists:get_value(id, Meta),
-            Name = proplists:get_value(name, Meta),
-            OsPid = proplists:get_value(os_pid, Meta),
-
             Signals = proplists:get_value(signals, PortInfo),
-            Link = proplists:get_value(links, Signals),
-            Monitors = proplists:get_value(monitors, Signals),
-            Connected = proplists:get_value(connected, Signals),
-
             IO = proplists:get_value(io, PortInfo),
-            Input = proplists:get_value(input, IO),
-            Output = proplists:get_value(output, IO),
-
             MemoryUsed = proplists:get_value(memory_used, PortInfo),
-            Memory = proplists:get_value(memory, MemoryUsed),
-            QueueSize = proplists:get_value(queue_size, MemoryUsed),
-            Menu = render_menu(info, Interval),
+            #{
+                port => #{
+                    port => Port,
+                    id => proplists:get_value(id, Meta),
+                    name => proplists:get_value(name, Meta),
+                    os_pid => proplists:get_value(os_pid, Meta),
+                    input => proplists:get_value(input, IO),
+                    output => proplists:get_value(output, IO),
+                    memory => proplists:get_value(memory, MemoryUsed),
+                    queue_size => proplists:get_value(queue_size, MemoryUsed),
+                    connected => proplists:get_value(connected, Signals)
+                },
+                links => proplists:get_value(links, Signals),
+                monitors => proplists:get_value(monitors, Signals),
+                type => collect_port_type(proplists:get_value(type, PortInfo))
+            }
+    end.
 
-            PortView = #{
-                port => Port,
-                id => Id,
-                name => Name,
-                os_pid => OsPid,
-                input => Input,
-                output => Output,
-                memory => Memory,
-                queue_size => QueueSize,
-                connected => Connected
-            },
-            Line1 = render_port_info(PortView),
-            Line2 = render_link_monitor(Link, Monitors),
-            Line3 = render_type_line(proplists:get_value(type, PortInfo)),
-            LastLine = render_last_line(),
+collect_port_type(Type) ->
+    #{
+        peername => port_type_value(peername, Type),
+        sockname => port_type_value(sockname, Type),
+        statistics => port_type_value(statistics, Type),
+        options => port_type_value(options, Type)
+    }.
 
-            ?output([?CURSOR_TOP, Menu, Line1, Line2, Line3, LastLine]),
-            next_draw_view(TimeRef, Interval, Port)
+port_type_value(Key, Type) ->
+    case lists:keyfind(Key, 1, Type) of
+        {_, Value} -> Value;
+        false -> undefined
     end.
 
 next_draw_view(TimeRef, Interval, Port) ->
@@ -106,7 +132,22 @@ next_draw_view_2(TimeRef, Interval, Port) ->
             render_worker(Port, Interval, TimeRef)
     end.
 
-render_port_info(#{
+render_port_sections(#{port := PortView, links := Link, monitors := Monitors, type := Type}) ->
+    [
+        render_port_info(PortView),
+        render_link_monitor(Link, Monitors),
+        render_type_line(Type)
+    ].
+
+render_port_info(PortView) ->
+    Fields = port_attr_value_fields(PortView),
+    Widths = port_info_widths([18, 20, 18, 20, 19, 21]),
+    [
+        render_port_info_title(Widths),
+        render_port_info_rows(Fields, Widths)
+    ].
+
+port_attr_value_fields(#{
     port := Port,
     id := Id,
     name := Name,
@@ -122,43 +163,66 @@ render_port_info(#{
             true -> ?RED;
             false -> ?GREEN
         end,
-    [Attr1W, Value1W, Attr2W, Value2W, Attr3W, Value3W] =
-        port_info_widths([18, 20, 18, 20, 19, 21]),
-    Title =
-        ?render([
-            ?GRAY_BG,
-            ?W("Attr", Attr1W),
-            ?W("Value", Value1W),
-            ?W("Attr", Attr2W),
-            ?W("Value", Value2W),
-            ?W("Attr", Attr3W),
-            ?W("Value", Value3W)
-        ]),
-    Rows =
-        ?render([
-            ?W("port", Attr1W),
-            ?W(Port, Value1W),
-            ?W("id", Attr2W),
-            ?W(Id, Value2W),
-            ?W("name", Attr3W),
-            ?W(Name, Value3W),
-            ?NEW_LINE,
-            ?W("queue_size", Attr1W),
-            ?W2(QueueSizeColor, QueueSize, Value1W + 1),
-            " ",
-            ?W("input", Attr2W),
-            ?W({byte, Input}, Value2W),
-            ?W("output", Attr3W),
-            ?W({byte, Output}, Value3W),
-            ?NEW_LINE,
-            ?W("connected", Attr1W),
-            ?W(Connected, Value1W),
-            ?W("memory", Attr2W),
-            ?W({byte, Memory}, Value2W),
-            ?W("os_pid", Attr3W),
-            ?W(OsPid, Value3W)
-        ]),
-    [Title, Rows].
+    #{
+        port => Port,
+        id => Id,
+        name => Name,
+        os_pid => OsPid,
+        input => Input,
+        output => Output,
+        memory => Memory,
+        queue_size => {QueueSize, QueueSizeColor},
+        connected => Connected
+    }.
+
+render_port_info_title([Attr1W, Value1W, Attr2W, Value2W, Attr3W, Value3W]) ->
+    ?render([
+        ?GRAY_BG,
+        ?W("Attr", Attr1W),
+        ?W("Value", Value1W),
+        ?W("Attr", Attr2W),
+        ?W("Value", Value2W),
+        ?W("Attr", Attr3W),
+        ?W("Value", Value3W)
+    ]).
+
+render_port_info_rows(
+    #{
+        port := Port,
+        id := Id,
+        name := Name,
+        os_pid := OsPid,
+        input := Input,
+        output := Output,
+        memory := Memory,
+        queue_size := {QueueSize, QueueSizeColor},
+        connected := Connected
+    },
+    [Attr1W, Value1W, Attr2W, Value2W, Attr3W, Value3W]
+) ->
+    ?render([
+        ?W("port", Attr1W),
+        ?W(Port, Value1W),
+        ?W("id", Attr2W),
+        ?W(Id, Value2W),
+        ?W("name", Attr3W),
+        ?W(Name, Value3W),
+        ?NEW_LINE,
+        ?W("queue_size", Attr1W),
+        ?W2(QueueSizeColor, QueueSize, Value1W + 1),
+        " ",
+        ?W("input", Attr2W),
+        ?W({byte, Input}, Value2W),
+        ?W("output", Attr3W),
+        ?W({byte, Output}, Value3W),
+        ?NEW_LINE,
+        ?W("connected", Attr1W),
+        ?W(Connected, Value1W),
+        ?W("memory", Attr2W),
+        ?W({byte, Memory}, Value2W),
+        ?W("os_pid", Attr3W),
+        ?W(OsPid, Value3W)
+    ]).
 
 render_link_monitor(Link, Monitors) ->
     LinkStr = [
@@ -191,34 +255,38 @@ render_link_monitor(Link, Monitors) ->
         ?W(MonitorsStr, ValueW)
     ]).
 
-render_type_line(List) ->
-    PeerName =
-        case lists:keyfind(peername, 1, List) of
-            {_, Peer} -> addr_to_str(Peer);
-            false -> "undefined"
-        end,
-    SockName =
-        case lists:keyfind(sockname, 1, List) of
-            {_, Sock} -> addr_to_str(Sock);
-            false -> "undefined"
-        end,
+render_type_line(TypeDetail) ->
+    [
+        render_socket_peer(TypeDetail),
+        render_stats_section(maps:get(statistics, TypeDetail)),
+        render_options_section(maps:get(options, TypeDetail))
+    ].
+
+render_socket_peer(#{peername := Peer, sockname := Sock}) ->
+    PeerName = port_addr_to_str(Peer),
+    SockName = port_addr_to_str(Sock),
     [SockW, ArrowW, PeerW] = type_line_widths(),
-    Line1 =
-        ?render([
-            ?UNDERLINE,
-            ?W("            " ++ SockName ++ "(sockname)", SockW),
-            ?W("<=============>", ArrowW),
-            ?W("            " ++ PeerName ++ "(peername)", PeerW)
-        ]),
-    Line2 =
-        case lists:keyfind(statistics, 1, List) of
-            {_, Stats} -> [Line1, render_stats(Stats)];
-            false -> Line1
-        end,
-    case lists:keyfind(options, 1, List) of
-        {_, Opts} -> Line2 ++ [render_opts(Opts)];
-        false -> Line2
-    end.
+    ?render([
+        ?UNDERLINE,
+        ?W("            " ++ SockName ++ "(sockname)", SockW),
+        ?W("<=============>", ArrowW),
+        ?W("            " ++ PeerName ++ "(peername)", PeerW)
+    ]).
+
+port_addr_to_str(undefined) ->
+    "undefined";
+port_addr_to_str(Addr) ->
+    addr_to_str(Addr).
+
+render_stats_section(undefined) ->
+    [];
+render_stats_section(Stats) ->
+    render_stats(Stats).
+
+render_options_section(undefined) ->
+    [];
+render_options_section(Opts) ->
+    render_opts(Opts).
 
 port_info_widths(Base) ->
     fill_last(observer_cli_lib:weighted_widths(Base, [0, 1, 0, 1, 0, 3]), wide_fill(5)).
@@ -389,49 +457,44 @@ fill_last([Last], Amount) ->
 fill_last([Width | Rest], Amount) ->
     [Width | fill_last(Rest, Amount)].
 
-render_last_line() ->
-    observer_cli_lib:render_last_line("q(quit)").
+render_footer() ->
+    observer_cli_lib:render_footer("q(quit)").
 
 render_menu(Type, Interval) ->
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
     Title = get_menu_title(Type),
     UpTime = observer_cli_lib:uptime(),
-    TitleWidth = ?COLUMN + 41 - erlang:length(UpTime) + observer_cli_lib:layout_extra_width(),
-    ?render([?W([Title | Text], TitleWidth) | UpTime]).
+    TitleWidth =
+        observer_cli_lib:layout_base_width() + 36 - erlang:length(UpTime) +
+            observer_cli_lib:layout_extra_width(),
+    observer_cli_lib:render_menu_header(Title, Text, TitleWidth).
 
 get_menu_title(Type) ->
-    [Home, Net, Port] = get_menu_title2(Type),
-    [Home, "|", Net, "|", Port].
+    [
+        observer_cli_lib:menu_item(Type, home, "Home(H)"),
+        "|",
+        observer_cli_lib:menu_item(Type, network, "Network(N)"),
+        "|",
+        observer_cli_lib:menu_item(Type, info, "Port Info(P)")
+    ].
 
-get_menu_title2(info) ->
-    [?UNSELECT("Home(H)"), ?UNSELECT("Network(N)"), ?SELECT("Port Info(P)")].
-
-parse_cmd(ViewOpts, Pid) ->
-    case parse_cmd_str(observer_cli_lib:to_list(io:get_line(""))) of
-        home_view ->
-            erlang:exit(Pid, stop),
-            observer_cli:start(ViewOpts);
-        net_view ->
-            erlang:exit(Pid, stop),
-            observer_cli_inet:start(ViewOpts);
-        Action ->
-            Action
-    end.
+parse_cmd() ->
+    parse_cmd_str(observer_cli_lib:to_list(io:get_line(""))).
 
 parse_cmd_str(Key) ->
     case Key of
-        "q\n" -> quit;
-        "Q\n" -> quit;
+        Cmd when Cmd =:= "q\n"; Cmd =:= "Q\n" -> quit;
         "P\n" -> info_view;
         "H\n" -> home_view;
         "N\n" -> net_view;
-        Number -> observer_cli_lib:parse_integer(Number)
+        {error, _Reason} -> quit;
+        Number -> observer_cli_command:parse_integer(Number)
     end.
 
 output_die_view(Port, Interval) ->
     Menu = render_menu(info, Interval),
-    Line = io_lib:format("\e[31mPort(~p) has already died.\e[0m~n", [Port]),
-    LastLine = render_last_line(),
+    Line = [observer_cli_lib:ansi_red(io_lib:format("Port(~p) has already died.", [Port])), "\n"],
+    LastLine = render_footer(),
     ?output([?CURSOR_TOP, Menu, Line, LastLine]).
 
 addr_to_str({Addr, Port}) ->

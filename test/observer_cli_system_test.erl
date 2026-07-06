@@ -4,6 +4,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include("observer_cli.hrl").
+-compile(nowarn_untyped_record).
 -include_lib("kernel/include/net_address.hrl").
 
 start_manager_branches_test() ->
@@ -24,18 +25,6 @@ start_manager_unknown_test() ->
         end
     ).
 
-clean_test() ->
-    Pid = spawn(fun() -> receive
-        after infinity -> ok
-        end end),
-    Ref = erlang:monitor(process, Pid),
-    observer_cli_system:clean([Pid]),
-    receive
-        {'DOWN', Ref, process, Pid, _} -> ok
-    after 1000 ->
-        ok
-    end.
-
 info_fields_test() ->
     {Info, Stat} = observer_cli_system:info_fields(),
     ?assertEqual(2, length(Info)),
@@ -51,12 +40,16 @@ fill_info_test() ->
     Fields = [
         {dynamic, dyn},
         {"A", a},
+        {"Attr", bold, a},
         {"B", {bytes, b}},
+        {"AttrBytes", bold, {bytes, b}},
         {"Group", [{"A2", a}]}
     ],
     Result = observer_cli_system:fill_info(Fields, Data),
     ?assertEqual({"Dyn", 2}, lists:nth(1, Result)),
-    ?assertEqual({"A", 1}, lists:nth(2, Result)).
+    ?assertEqual({"A", 1}, lists:nth(2, Result)),
+    ?assertEqual({"Attr", bold, 1}, lists:nth(3, Result)),
+    ?assertEqual({"AttrBytes", bold, {bytes, 1024}}, lists:nth(5, Result)).
 
 fill_info_undefined_test() ->
     Data = [{present, 1}],
@@ -135,8 +128,102 @@ render_sys_info_wide_layout_test() ->
     ?assert(lists:nth(2, WideCompile) > lists:nth(2, BaseCompile)).
 
 render_sys_info_empty_ps_test() ->
-    Line = observer_cli_system:render_sys_info("printf 'header\\n'"),
+    Line = observer_cli_system:render_sys_info(
+        observer_cli_system:collect_sys_info("printf 'header\\n'")
+    ),
     ?assert(string:find(lists:flatten(Line), "System/Architecture") =/= nomatch).
+
+collect_sys_info_test() ->
+    Cmd = "printf 'header\\n 1 2 3 4\\n'",
+    OsProcessInfo = observer_cli_system:collect_os_process_info(Cmd),
+    ?assertEqual("1%", proplists:get_value(ps_cpu, OsProcessInfo)),
+    ?assertEqual("2%", proplists:get_value(ps_mem, OsProcessInfo)),
+    ?assertEqual(3 * 1024, proplists:get_value(ps_rss, OsProcessInfo)),
+    ?assertEqual(4 * 1024, proplists:get_value(ps_vsz, OsProcessInfo)),
+    Info = observer_cli_system:collect_sys_info(Cmd),
+    ?assertEqual("1%", proplists:get_value(ps_cpu, Info)),
+    ?assertEqual("2%", proplists:get_value(ps_mem, Info)),
+    ?assertEqual(3 * 1024, proplists:get_value(ps_rss, Info)),
+    ?assertEqual(4 * 1024, proplists:get_value(ps_vsz, Info)).
+
+collect_system_info_test() ->
+    Info = observer_cli_system:collect_system_info("printf 'header\\n 1 2 3 4\\n'"),
+    ?assertEqual(
+        lists:sort([allocator_info, dist_nodes_info, os_process_info, sys_info]),
+        lists:sort(maps:keys(Info))
+    ),
+    AllocatorInfo = maps:get(allocator_info, Info),
+    ?assertEqual(
+        lists:sort([
+            average_block_curs,
+            average_block_maxes,
+            cache_hit_info,
+            sbcs_to_mbcs_curs,
+            sbcs_to_mbcs_maxes
+        ]),
+        lists:sort(maps:keys(AllocatorInfo))
+    ),
+    ?assert(is_list(maps:get(cache_hit_info, AllocatorInfo))),
+    ?assert(is_list(maps:get(average_block_curs, AllocatorInfo))),
+    ?assert(is_list(maps:get(average_block_maxes, AllocatorInfo))),
+    ?assert(is_list(maps:get(sbcs_to_mbcs_curs, AllocatorInfo))),
+    ?assert(is_list(maps:get(sbcs_to_mbcs_maxes, AllocatorInfo))),
+    OsProcessInfo = maps:get(os_process_info, Info),
+    SysInfo = maps:get(sys_info, Info),
+    DistNodesInfo = maps:get(dist_nodes_info, Info),
+    ?assertEqual(
+        lists:sort([ps_cpu, ps_mem, ps_rss, ps_vsz]),
+        lists:sort([Key || {Key, _} <- OsProcessInfo])
+    ),
+    ?assertEqual("1%", proplists:get_value(ps_cpu, OsProcessInfo)),
+    ?assertEqual(undefined, proplists:get_value(ps_cpu, SysInfo)),
+    ?assert(lists:keymember(otp_release, 1, SysInfo)),
+    ?assert(lists:keymember(schedulers_online, 1, SysInfo)),
+    ?assert(lists:keymember(io_input, 1, SysInfo)),
+    ?assert(is_list(DistNodesInfo)),
+    [
+        ?assertMatch(
+            {
+                _Node,
+                #{
+                    queue_size := _,
+                    queue_limit := _,
+                    address := _,
+                    in := _,
+                    out := _,
+                    type := _,
+                    state := _
+                }
+            },
+            Row
+        )
+     || Row <- DistNodesInfo
+    ].
+
+render_system_sections_test() ->
+    FullSysInfo = observer_cli_system:collect_sys_info("printf 'header\\n 1 2 3 4\\n'"),
+    {OsProcessInfo, SysInfo} = split_os_process_info(FullSysInfo),
+    [Sys, Allocator, DistNodes, CacheHit] = observer_cli_system:render_system_sections(#{
+        os_process_info => OsProcessInfo,
+        sys_info => SysInfo,
+        allocator_info => #{
+            average_block_curs => allocator_curs(),
+            average_block_maxes => allocator_maxes(),
+            sbcs_to_mbcs_curs => allocator_sbcs_curs(),
+            sbcs_to_mbcs_maxes => allocator_sbcs_maxes(),
+            cache_hit_info => cache_hit_fixture()
+        },
+        dist_nodes_info => []
+    }),
+    ?assertEqual(observer_cli_system:render_sys_info(FullSysInfo), Sys),
+    ?assertEqual(
+        observer_cli_system:render_block_size_info(
+            allocator_curs(), allocator_maxes(), allocator_sbcs_curs(), allocator_sbcs_maxes()
+        ),
+        Allocator
+    ),
+    ?assertEqual(observer_cli_system:render_dist_node_info([]), DistNodes),
+    ?assertEqual(observer_cli_system:render_cache_hit_rates(cache_hit_fixture(), 12), CacheHit).
 
 render_cache_hit_rates_test() ->
     CacheHitInfo = [
@@ -194,6 +281,35 @@ render_block_size_info_wide_layout_test() ->
     ?assertEqual([1], same_columns(Base, Wide, [1])),
     ?assertEqual([2, 3, 4, 5, 6, 7], wider_columns(Base, Wide, [2, 3, 4, 5, 6, 7])).
 
+system_golden_output_fragments_test() ->
+    observer_cli_test_io:with_geometry(
+        24,
+        201,
+        [],
+        fun() ->
+            Output = system_golden_output(),
+            observer_cli_test_io:assert_stable_fragments(Output, [
+                "System(S)",
+                "Interval: 1500ms",
+                "System/Architecture",
+                "CPU's and Threads",
+                "Memory Usag",
+                "Statistics",
+                "compiled for",
+                "Allocator Type",
+                "Current Mbcs",
+                "Max SbcsToMbcs",
+                "binary_alloc",
+                "IN|",
+                "Hits/Calls",
+                "HitRat",
+                "01|"
+            ]),
+            observer_cli_test_io:assert_ansi_boundaries(Output),
+            assert_system_golden_value_columns()
+        end
+    ).
+
 get_address_invalid_test() ->
     Info = [{address, #net_address{address = {foo, 1234}}}],
     Addr = observer_cli_system:get_address(Info),
@@ -203,31 +319,19 @@ get_address_unknown_test() ->
     Info = [{address, #net_address{address = undefined}}],
     ?assertEqual("unknown", observer_cli_system:get_address(Info)).
 
-render_dist_node_info_fake_test() ->
-    Node = 'fake@node',
-    Created =
-        case ets:info(sys_dist, owner) of
-            undefined ->
-                ets:new(sys_dist, [named_table, public, set]),
-                true;
-            _ ->
-                false
-        end,
-    Info = [
-        {Node, [
-            {state, connected},
-            {type, normal},
-            {address, #net_address{address = {{127, 0, 0, 1}, 1234}}},
-            {in, 1},
-            {out, 2}
-        ]}
-    ],
-    Lines = observer_cli_system:render_dist_node_info(Info),
-    ?assert(is_list(Lines)),
-    case Created of
-        true -> ets:delete(sys_dist);
-        false -> ok
-    end.
+render_dist_node_info_unsupported_queue_test() ->
+    Lines = observer_cli_system:render_dist_node_info([
+        {node(), #{
+            queue_size => not_found,
+            queue_limit => 1024,
+            address => "unknown",
+            in => 0,
+            out => 0,
+            type => normal,
+            state => up
+        }}
+    ]),
+    ?assert(string:find(lists:flatten(Lines), "unsupp") =/= nomatch).
 
 render_dist_node_info_wide_layout_test() ->
     Created = ensure_sys_dist(),
@@ -251,6 +355,84 @@ render_worker_redraw_test() ->
         {'DOWN', Ref, process, Pid, _} -> ok
     after 1000 ->
         ok
+    end.
+
+render_worker_empty_sys_dist_test() ->
+    case ets:info(sys_dist, owner) of
+        undefined ->
+            ets:new(sys_dist, [named_table, public, set]),
+            try
+                Cmd = "printf 'header\\n 1 2 3 4\\n'",
+                Pid = spawn(fun() ->
+                    observer_cli_system:render_worker(Cmd, 1, ?INIT_TIME_REF)
+                end),
+                Ref = erlang:monitor(process, Pid),
+                Pid ! quit,
+                receive
+                    {'DOWN', Ref, process, Pid, _} -> ok
+                after 1000 ->
+                    ok
+                end
+            after
+                ets:delete(sys_dist)
+            end;
+        _ ->
+            ok
+    end.
+
+render_dist_node_info_live_peer_test() ->
+    with_distribution(fun() ->
+        {ok, Peer, Node} = peer:start_link(#{name => peer:random_name("observer_cli_sys")}),
+        try
+            ?assertMatch([_ | _], ets:lookup(sys_dist, Node)),
+            NodesInfo = observer_cli_system:collect_distribution_info(),
+            ?assertMatch([_ | _], NodesInfo),
+            Lines = observer_cli_system:render_dist_node_info(NodesInfo),
+            ?assert(string:find(lists:flatten(Lines), "%") =/= nomatch)
+        after
+            peer:stop(Peer)
+        end
+    end).
+
+system_golden_output() ->
+    [
+        observer_cli_lib:render_menu(allocator, "Interval: 1500ms"),
+        observer_cli_system:render_sys_info(
+            system_fixture(), cpu_fixture(), memory_fixture(), statistics_fixture()
+        ),
+        observer_cli_system:render_block_size_info(
+            allocator_curs(), allocator_maxes(), allocator_sbcs_curs(), allocator_sbcs_maxes()
+        ),
+        observer_cli_system:render_cache_hit_rates(cache_hit_fixture(), 12),
+        observer_cli_lib:render_footer("q(quit)")
+    ].
+
+assert_system_golden_value_columns() ->
+    {_, BaseSysRow, _} = sys_info_widths(80),
+    {_, WideSysRow, _} = sys_info_widths(201),
+    ?assertEqual([2, 4, 6, 9], wider_columns(BaseSysRow, WideSysRow, [2, 4, 6, 9])),
+    ?assertEqual(
+        [2, 3, 4, 5, 6, 7],
+        wider_columns(block_size_widths(80), block_size_widths(201), [2, 3, 4, 5, 6, 7])
+    ),
+    ?assertEqual(
+        [2, 5, 8, 11],
+        wider_columns(cache_hit_widths(80), cache_hit_widths(201), [2, 5, 8, 11])
+    ).
+
+with_distribution(Fun) ->
+    WasAlive = erlang:is_alive(),
+    case WasAlive of
+        true ->
+            Fun();
+        false ->
+            Name = list_to_atom(peer:random_name("observer_cli_sys_origin")),
+            {ok, _} = net_kernel:start([Name, shortnames]),
+            try
+                Fun()
+            after
+                net_kernel:stop()
+            end
     end.
 
 sys_info_widths(Columns) ->
@@ -381,14 +563,22 @@ statistics_fixture() ->
 
 dist_node_fixture() ->
     [
-        {'very_long_fake_node_for_layout@127.0.0.1', [
-            {state, connected},
-            {type, normal},
-            {address, #net_address{address = {{127, 0, 0, 1}, 1234}}},
-            {in, 1},
-            {out, 2}
-        ]}
+        {'very_long_fake_node_for_layout@127.0.0.1', #{
+            queue_size => 1,
+            queue_limit => 1024,
+            address => "127.0.0.1:1234",
+            in => 1,
+            out => 2,
+            type => normal,
+            state => connected
+        }}
     ].
+
+split_os_process_info(SysInfo) ->
+    lists:partition(
+        fun({Key, _}) -> lists:member(Key, [ps_cpu, ps_mem, ps_rss, ps_vsz]) end,
+        SysInfo
+    ).
 
 ensure_sys_dist() ->
     case ets:info(sys_dist, owner) of

@@ -52,6 +52,75 @@ update_app_stats_group_leader_chain_test() ->
     exit(Child, kill),
     exit(GroupLeader, kill).
 
+collect_app_info_legacy_list_test() ->
+    Child = spawn(fun() -> receive
+        after infinity -> ok
+        end end),
+    Dead = spawn(fun() -> ok end),
+    DeadRef = erlang:monitor(process, Dead),
+    receive
+        {'DOWN', DeadRef, process, Dead, _} -> ok
+    after 1000 ->
+        erlang:error(dead_process_still_alive)
+    end,
+    {group_leader, Leader} = erlang:process_info(Child, group_leader),
+    AllApps = #{
+        app1 => {0, 0, 0, 0, "Started", "1.0"},
+        no_group => {0, 0, 0, 0, "Unknown", "unknown"}
+    },
+    try
+        Found = observer_cli_application:collect_app_info(
+            AllApps, #{Leader => app1}, [self(), Dead, Child], self()
+        ),
+        {AppCount, AppMemory, AppReds, _AppMsgQ, "Started", "1.0"} = maps:get(app1, Found),
+        ?assertEqual(1, AppCount),
+        ?assert(AppMemory > 0),
+        ?assert(AppReds >= 0),
+
+        Unknown = observer_cli_application:collect_app_info(AllApps, #{}, [Child], self()),
+        {UnknownCount, UnknownMemory, UnknownReds, _UnknownMsgQ, "Unknown", "unknown"} =
+            maps:get(no_group, Unknown),
+        ?assertEqual(1, UnknownCount),
+        ?assert(UnknownMemory > 0),
+        ?assert(UnknownReds >= 0)
+    after
+        exit(Child, kill)
+    end.
+
+collect_app_info_structure_test() ->
+    Info = observer_cli_application:collect_app_info(),
+    ?assert(is_map(Info)),
+    ?assert(maps:is_key(no_group, Info)),
+    ?assert(lists:all(fun app_info_entry/1, maps:to_list(Info))).
+
+app_info_entry({_App, {Count, Memory, Reductions, MsgQueueLen, Status, Version}}) ->
+    is_integer(Count) andalso Count >= 0 andalso
+        is_integer(Memory) andalso Memory >= 0 andalso
+        is_integer(Reductions) andalso Reductions >= 0 andalso
+        is_integer(MsgQueueLen) andalso MsgQueueLen >= 0 andalso
+        is_list(Status) andalso
+        is_list(Version);
+app_info_entry(_) ->
+    false.
+
+app_render_info_sorting_test() ->
+    AppInfo = #{
+        high_app => {3, 30, 300, 2, "Started", "1.0"},
+        low_app => {1, 10, 100, 0, "Started", "1.0"},
+        mid_app => {2, 20, 200, 1, "Loaded", "1.0"}
+    },
+    ?assertEqual(
+        {1, [
+            {0, {3, "Started"}, [high_app, 3, 30, 300, 2, "Started", "1.0"]},
+            {0, {2, "Loaded"}, [mid_app, 2, 20, 200, 1, "Loaded", "1.0"]}
+        ]},
+        observer_cli_application:app_render_info(AppInfo, 2, 1, {proc_count, 1})
+    ),
+    ?assertEqual(
+        {3, [{0, {1, "Started"}, [low_app, 1, 10, 100, 0, "Started", "1.0"]}]},
+        observer_cli_application:app_render_info(AppInfo, 2, 2, {proc_count, 1})
+    ).
+
 start_quit_test() ->
     observer_cli_test_io:with_input(
         ["q\n"],
@@ -67,6 +136,15 @@ start_manager_branches_test() ->
         Inputs,
         fun() ->
             Opts = #view_opts{auto_row = false},
+            ?assertEqual(quit, observer_cli_application:start(Opts))
+        end
+    ).
+
+start_redraw_test() ->
+    observer_cli_test_io:with_input(
+        [{sleep, 30, "q\n"}],
+        fun() ->
+            Opts = #view_opts{auto_row = false, app = #app{interval = 1}},
             ?assertEqual(quit, observer_cli_application:start(Opts))
         end
     ).

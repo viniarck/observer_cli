@@ -24,6 +24,15 @@ start_manager_branches_test() ->
         end
     ).
 
+start_redraw_test() ->
+    observer_cli_test_io:with_input(
+        [{sleep, 30, "q\n"}],
+        fun() ->
+            Opts = #view_opts{auto_row = false, ets = #ets{interval = 1}},
+            ?assertEqual(quit, observer_cli_ets:start(Opts))
+        end
+    ).
+
 get_ets_info_existing_test() ->
     TabName = test_ets_table,
     ets:new(TabName, [named_table, public, set]),
@@ -48,6 +57,63 @@ unread_test() ->
     {_, _, Info} = observer_cli_ets:unread(),
     ?assertEqual(unread, proplists:get_value(name, Info)).
 
+collect_ets_info_test() ->
+    TabName = collect_ets_table,
+    ets:new(TabName, [named_table, public, set]),
+    try
+        Collected = observer_cli_ets:collect_ets_info(size),
+        ?assert(
+            lists:any(
+                fun({_, _, Info}) -> proplists:get_value(name, Info) =:= TabName end,
+                Collected
+            )
+        )
+    after
+        ets:delete(TabName)
+    end.
+
+collect_ets_render_info_test() ->
+    TabName = collect_ets_render_table,
+    ets:new(TabName, [named_table, public, set]),
+    try
+        RowsToRender = erlang:length(ets:all()),
+        {Start, Rows} = observer_cli_ets:collect_ets_render_info(RowsToRender, 1, size),
+        ?assertEqual(1, Start),
+        [CollectedRow | _] = [
+            Row
+         || Row = {_, _, Info} <- Rows,
+            proplists:get_value(name, Info) =:= TabName
+        ],
+        {0, SortValue, Info} = CollectedRow,
+        ?assertEqual(proplists:get_value(size, Info), SortValue),
+        ?assert(
+            lists:all(
+                fun(Key) -> proplists:is_defined(Key, Info) end,
+                [
+                    name,
+                    size,
+                    memory,
+                    type,
+                    protection,
+                    keypos,
+                    write_concurrency,
+                    read_concurrency,
+                    owner
+                ]
+            )
+        )
+    after
+        ets:delete(TabName)
+    end.
+
+render_ets_info_preserves_sorted_page_test() ->
+    Small = ets_fixture(small_ets_table, 1, 10),
+    Big = ets_fixture(big_ets_table, 4, 20),
+    [_Title, Row] = observer_cli_ets:render_ets_info([Small, Big], 1, 1, size),
+    Text = lists:flatten(Row),
+    ?assert(string:find(Text, "big_ets_table") =/= nomatch),
+    ?assertEqual(nomatch, string:find(Text, "small_ets_table")).
+
 render_ets_info_wide_layout_test() ->
     TabName = wide_layout_ets_table,
     ets:new(TabName, [named_table, public, set]),
@@ -70,6 +136,23 @@ ets_row_widths(Columns) ->
             {observer_cli_test_io:column_widths(Title), observer_cli_test_io:column_widths(Row)}
         end
     ).
+
+ets_fixture(Name, Size, Memory) ->
+    {
+        0,
+        Size,
+        [
+            {name, Name},
+            {write_concurrency, false},
+            {read_concurrency, false},
+            {memory, Memory},
+            {owner, self()},
+            {size, Size},
+            {type, set},
+            {keypos, 1},
+            {protection, public}
+        ]
+    }.
 
 unchanged_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
     [

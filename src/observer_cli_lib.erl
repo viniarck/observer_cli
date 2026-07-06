@@ -11,22 +11,36 @@
 -export([to_percent/1]).
 -export([to_list/1]).
 -export([green/1]).
+-export([ansi_green/1]).
+-export([ansi_red/1]).
 -export([to_byte/1]).
 -export([mfa_to_list/1]).
 -export([render/1]).
 -export([next_redraw/2]).
 -export([flush_redraw_timer/1]).
 -export([render_menu/2]).
+-export([render_top_menu/2]).
+-export([render_menu_header/3]).
+-export([layout_base_width/0]).
 -export([layout_width/0]).
 -export([layout_extra_width/0]).
+-export([layout_extra_width/1]).
+-export([layout_extra_width/2]).
 -export([weighted_widths/2]).
 -export([get_terminal_rows/1]).
 -export([select/1]).
 -export([unselect/1]).
+-export([selected_menu_item/1]).
+-export([unselected_menu_item/1]).
+-export([menu_item/3]).
+-export([menu_items/2]).
 -export([parse_integer/1]).
 -export([pad_rendered/1]).
 -export([render_last_line/1]).
+-export([render_footer/1]).
+-export([render_footer/2]).
 -export([exit_processes/1]).
+-export([next_page/2]).
 -export([update_page_pos/3]).
 -export([get_pos/4]).
 -export([sublist/3]).
@@ -34,7 +48,6 @@
 -export([pipe/2]).
 
 -ifdef(TEST).
--export([parse_cmd_str/1]).
 -export([visible_length/1]).
 -endif.
 
@@ -77,23 +90,36 @@ get_menu_title(Selection, MnesiaTitle) ->
         {doc, "Doc(D)"},
         {plugin, "Plugin(P)"}
     ],
-    lists:map(
-        fun
-            ({_Key, ""}) -> unselect("");
-            ({Key, Value}) when Key =:= Selection -> select(Value) ++ "|";
-            ({_Key, Value}) -> unselect(Value) ++ "|"
-        end,
-        Options
-    ).
+    menu_items(Selection, Options).
 
 -spec select(string()) -> list().
-select(Title) -> [?RED_BG, Title, ?RESET_BG].
+select(Title) -> selected_menu_item(Title).
 
 -spec unselect(string()) -> list().
-unselect(Title) -> [?L_GRAY_BG, Title, ?RESET_BG].
+unselect(Title) -> unselected_menu_item(Title).
+
+-spec selected_menu_item(iodata()) -> iolist().
+selected_menu_item(Title) -> [?MENU_SELECTED_BG, Title, ?ANSI_RESET_BG].
+
+-spec unselected_menu_item(iodata()) -> iolist().
+unselected_menu_item(Title) -> [?MENU_UNSELECTED_BG, Title, ?ANSI_RESET_BG].
+
+-spec menu_item(term(), term(), iodata()) -> iolist().
+menu_item(Selection, Selection, Title) -> selected_menu_item(Title);
+menu_item(_Selection, _Key, Title) -> unselected_menu_item(Title).
+
+-spec menu_items(term(), [{term(), iodata()}]) -> iolist().
+menu_items(Selection, Items) ->
+    [menu_item(Selection, Key, Title) ++ "|" || {Key, Title} <- Items].
 
 -spec green(list()) -> list().
-green(String) -> "\e[32;1m" ++ String ++ "\e[0m".
+green(String) -> unicode:characters_to_list(iolist_to_binary(ansi_green(String))).
+
+-spec ansi_green(iodata()) -> iolist().
+ansi_green(Text) -> [?ANSI_BRIGHT_GREEN, Text, ?ANSI_RESET].
+
+-spec ansi_red(iodata()) -> iolist().
+ansi_red(Text) -> [?ANSI_RED, Text, ?ANSI_RESET].
 
 -spec to_byte(pos_integer()) -> list().
 %% byte
@@ -127,6 +153,10 @@ render(FA) ->
 
 -spec render_menu(atom(), string()) -> iolist().
 render_menu(Type, Text) ->
+    render_top_menu(Type, Text).
+
+-spec render_top_menu(atom(), string()) -> iolist().
+render_top_menu(Type, Text) ->
     MnesiaTitle =
         case ets:info(schema, owner) of
             undefined -> "";
@@ -134,8 +164,12 @@ render_menu(Type, Text) ->
         end,
     Title = get_menu_title(Type, MnesiaTitle),
     UpTime = uptime(),
-    TitleWidth = ?COLUMN + 151 - erlang:length(UpTime) + layout_extra_width(),
-    ?render([?W([Title | Text], TitleWidth) | UpTime]).
+    TitleWidth = layout_base_width() + 146 - erlang:length(UpTime) + layout_extra_width(),
+    render_menu_header(Title, Text, TitleWidth).
+
+-spec render_menu_header(iodata(), iodata(), pos_integer()) -> iolist().
+render_menu_header(Title, Text, TitleWidth) ->
+    ?render([?W([Title, Text], TitleWidth) | uptime()]).
 
 tidy_format_args([], _NeedLine, FAcc, AAcc) ->
     {FAcc, AAcc};
@@ -171,144 +205,39 @@ to_str(Term) -> to_list(Term).
 
 -spec parse_cmd(view_opts(), atom(), list()) -> atom() | string() | tuple().
 parse_cmd(ViewOpts, Module, Args) ->
-    case parse_cmd_str(to_list(io:get_line(""))) of
+    case observer_cli_command:parse_shared(to_list(io:get_line(""))) of
         home_view ->
-            apply(Module, clean, [Args]),
+            clean_before_route(Module, Args),
             observer_cli:start(ViewOpts);
         system_view ->
-            apply(Module, clean, [Args]),
+            clean_before_route(Module, Args),
             observer_cli_system:start(ViewOpts);
         app_view ->
-            apply(Module, clean, [Args]),
+            clean_before_route(Module, Args),
             observer_cli_application:start(ViewOpts);
         inet_view ->
-            apply(Module, clean, [Args]),
+            clean_before_route(Module, Args),
             observer_cli_inet:start(ViewOpts);
         mnesia_view ->
-            apply(Module, clean, [Args]),
+            clean_before_route(Module, Args),
             observer_cli_mnesia:start(ViewOpts);
         ets_view ->
-            apply(Module, clean, [Args]),
+            clean_before_route(Module, Args),
             observer_cli_ets:start(ViewOpts);
         help_view ->
-            apply(Module, clean, [Args]),
+            clean_before_route(Module, Args),
             observer_cli_help:start(ViewOpts);
         plugin_view ->
-            apply(Module, clean, [Args]),
+            clean_before_route(Module, Args),
             observer_cli_plugin:start(ViewOpts);
         Action ->
             Action
     end.
 
-parse_cmd_str(Key) ->
-    case Key of
-        "H\n" ->
-            home_view;
-        "S\n" ->
-            system_view;
-        "A\n" ->
-            app_view;
-        "N\n" ->
-            inet_view;
-        "M\n" ->
-            mnesia_view;
-        "E\n" ->
-            ets_view;
-        "D\n" ->
-            help_view;
-        "P\n" ->
-            plugin_view;
-        %% inet
-        "ic\n" ->
-            inet_count;
-        "iw\n" ->
-            inet_window;
-        "rc\n" ->
-            recv_cnt;
-        "ro\n" ->
-            recv_oct;
-        "sc\n" ->
-            send_cnt;
-        "so\n" ->
-            send_oct;
-        "cnt\n" ->
-            cnt;
-        "oct\n" ->
-            oct;
-        "q\n" ->
-            quit;
-        "Q\n" ->
-            quit;
-        %% backward
-        "pu\n" ->
-            page_up_top_n;
-        %% forward
-        "pd\n" ->
-            page_down_top_n;
-        %% backward
-        "PU\n" ->
-            page_up_top_n;
-        %% forward
-        "PD\n" ->
-            page_down_top_n;
-        %% backward
-        "B\n" ->
-            page_up_top_n;
-        %% forward
-        "F\n" ->
-            page_down_top_n;
-        %% home
-        "p\n" ->
-            pause_or_resume;
-        "r\n" ->
-            {func, proc_count, reductions};
-        "b\n" ->
-            {func, proc_count, binary_memory};
-        "t\n" ->
-            {func, proc_count, total_heap_size};
-        "m\n" ->
-            {func, proc_count, memory};
-        "mq\n" ->
-            {func, proc_count, message_queue_len};
-        "rr\n" ->
-            {func, proc_window, reductions};
-        "bb\n" ->
-            {func, proc_window, binary_memory};
-        "tt\n" ->
-            {func, proc_window, total_heap_size};
-        "mm\n" ->
-            {func, proc_window, memory};
-        "mmq\n" ->
-            {func, proc_window, message_queue_len};
-        "\n" ->
-            jump;
-        "s\n" ->
-            size;
-        "hide\n" ->
-            hide;
-        "`\n" ->
-            scheduler_usage;
-        [$< | PidStr] ->
-            to_pid(PidStr);
-        [$> | PidStr] ->
-            to_pid(PidStr);
-        %% {error, estale}|{error, terminated}
-        {error, _Reason} ->
-            quit;
-        Number ->
-            parse_integer(Number)
-    end.
-
--spec to_pid(string()) -> {go_to_pid, pid()} | quit.
-to_pid(Str) ->
-    case string:tokens(Str, ".<>\n") of
-        [X, Y, Z] ->
-            {go_to_pid, list_to_pid("<" ++ X ++ "." ++ Y ++ "." ++ Z ++ ">")};
-        [Y] ->
-            {go_to_pid, list_to_pid("<0." ++ Y ++ ".0>")};
-        _ ->
-            quit
-    end.
+clean_before_route(observer_cli, Args) ->
+    observer_cli:clean(Args);
+clean_before_route(_Module, Args) ->
+    exit_processes(Args).
 
 -spec next_redraw(reference() | ?INIT_TIME_REF, pos_integer()) -> reference().
 next_redraw(LastTimeRef, Interval) ->
@@ -320,20 +249,33 @@ flush_redraw_timer(LastTimeRef) ->
     LastTimeRef =/= ?INIT_TIME_REF andalso erlang:cancel_timer(LastTimeRef),
     ok.
 
+-spec layout_base_width() -> pos_integer().
+layout_base_width() ->
+    ?COLUMN + 5.
+
 -spec layout_width() -> pos_integer().
 layout_width() ->
+    BaseWidth = layout_base_width(),
     case io:columns() of
-        {ok, Columns} when is_integer(Columns), Columns > ?COLUMN + 5 ->
+        {ok, Columns} when is_integer(Columns), Columns > BaseWidth ->
             Columns - 1;
         {ok, Columns} when is_integer(Columns) ->
-            erlang:max(?COLUMN + 5, Columns);
+            erlang:max(BaseWidth, Columns);
         _ ->
-            ?COLUMN + 5
+            BaseWidth
     end.
 
 -spec layout_extra_width() -> non_neg_integer().
 layout_extra_width() ->
-    layout_width() - (?COLUMN + 5).
+    layout_extra_width(layout_base_width()).
+
+-spec layout_extra_width(pos_integer()) -> non_neg_integer().
+layout_extra_width(BaseWidth) ->
+    layout_extra_width(layout_width(), BaseWidth).
+
+-spec layout_extra_width(pos_integer(), pos_integer()) -> non_neg_integer().
+layout_extra_width(LayoutWidth, BaseWidth) ->
+    erlang:max(LayoutWidth - BaseWidth, 0).
 
 -spec weighted_widths([non_neg_integer()], [non_neg_integer()]) -> [non_neg_integer()].
 weighted_widths(BaseWidths, Weights) when length(BaseWidths) =:= length(Weights) ->
@@ -383,15 +325,29 @@ pad_line(Line) ->
 
 trim_border_space(Line) ->
     Reset = ?RESET,
-    Suffix = <<$|, $\s, Reset/binary>>,
-    case take_suffix(Line, Suffix) of
-        {Body, _} -> <<Body/binary, $|, Reset/binary>>;
-        false -> Line
+    case take_suffix(Line, <<Reset/binary, $\s, $|>>) of
+        {Body, _} ->
+            <<Body/binary, Reset/binary, $|>>;
+        false ->
+            Suffix = <<$|, $\s, Reset/binary>>,
+            case take_suffix(Line, Suffix) of
+                {Body, _} -> <<Body/binary, $|, Reset/binary>>;
+                false -> Line
+            end
     end.
 
 border_parts(Line) ->
     Reset = ?RESET,
+    ResetBeforeBorderSuffix = <<Reset/binary, $|>>,
     ResetSuffix = <<$|, Reset/binary>>,
+    case take_suffix(Line, ResetBeforeBorderSuffix) of
+        {Body, Suffix} ->
+            {Body, Suffix};
+        false ->
+            border_parts(Line, ResetSuffix)
+    end.
+
+border_parts(Line, ResetSuffix) ->
     case take_suffix(Line, <<"|">>) of
         {Body, Suffix} ->
             {Body, Suffix};
@@ -433,23 +389,19 @@ get_terminal_rows(_AutoRow = true) ->
 
 -spec parse_integer(string()) -> {term(), term()}.
 parse_integer(Number) ->
-    case string:to_integer(Number) of
-        {error, _Reason} ->
-            {input_str, Number -- "\n"};
-        {Integer, _} ->
-            if
-                Integer >= ?MIN_INTERVAL ->
-                    {new_interval, Integer};
-                Integer > 0 ->
-                    {jump, Integer};
-                true ->
-                    {input_str, Number -- "\n"}
-            end
-    end.
+    observer_cli_command:parse_integer(Number).
 
 -spec render_last_line(iodata()) -> list().
 render_last_line(Text) ->
-    ?render([?UNDERLINE, ?GRAY_BG, ?W(Text, layout_width() - 3)]).
+    render_footer(Text).
+
+-spec render_footer(iodata()) -> list().
+render_footer(Text) ->
+    render_footer(Text, layout_width() - 3).
+
+-spec render_footer(iodata(), pos_integer()) -> list().
+render_footer(Text, Width) ->
+    ?render([?ANSI_UNDERLINE, ?ANSI_INVERSE, ?W(Text, Width)]).
 
 -spec exit_processes(list()) -> ok.
 exit_processes(List) ->
@@ -462,6 +414,10 @@ exit_processes(List) ->
     ],
     flush(),
     ok.
+
+-spec next_page(integer(), integer()) -> pos_integer().
+next_page(CurPage, Delta) ->
+    erlang:max(CurPage + Delta, 1).
 
 -spec update_page_pos(pid() | pos_integer(), pos_integer(), list()) -> list().
 update_page_pos(StorePid, Page, Pages) when is_pid(StorePid) ->

@@ -19,15 +19,18 @@
 -ifdef(TEST).
 
 -export([
-    render_system_line/2,
+    render_system_line/2, render_system_line/3,
     render_memory_process_line/3,
     render_scheduler_usage/1,
+    render_footer/0,
     render_top_n_view/5, render_top_n_view/6,
     transform_seq/3,
     process_bar_format_style/2,
     warning_color/1,
     format_atom_info/2,
+    accept_net_ticktime_result/2,
     get_refresh_prompt/4,
+    collect_top_n/5,
     get_current_initial_call/1,
     get_port_proc_info/2,
     get_top_n_info/1,
@@ -35,9 +38,11 @@
     get_stable_system_info/0,
     get_atom_status/0,
     get_pid_info/2,
+    collect_home_snapshot/6,
     node_stats/2,
     get_incremental_stats/1,
-    check_auto_row/0
+    check_auto_row/0,
+    select_home_process/3
 ]).
 
 -endif.
@@ -132,65 +137,110 @@ rpc_start(Node, Interval) ->
     end.
 
 manager(StorePid, RenderPid, Opts, LastSchWallFlag) ->
+    Resource = home_resource(RenderPid, StorePid, LastSchWallFlag, Opts),
+    Action = observer_cli_lib:parse_cmd(Opts, ?MODULE, Resource),
+    handle_home_action(Action, StorePid, RenderPid, Opts, LastSchWallFlag, Resource).
+
+home_resource(RenderPid, StorePid, LastSchWallFlag, #view_opts{
+    home = #home{scheduler_usage = SchUsage}
+}) ->
+    [RenderPid, StorePid, LastSchWallFlag, SchUsage].
+
+handle_home_action(
+    quit,
+    StorePid,
+    RenderPid,
     #view_opts{
         home =
-            Home =
-                #home{
-                    cur_page = CurPage,
-                    pages = Pages,
-                    scheduler_usage = SchUsage
-                }
-    } =
-        Opts,
-    Resource = [RenderPid, StorePid, LastSchWallFlag, SchUsage],
-    case observer_cli_lib:parse_cmd(Opts, ?MODULE, Resource) of
-        quit ->
-            erlang:unlink(RenderPid),
-            erlang:send(RenderPid, quit),
-            set_scheduler_wall_time(LastSchWallFlag, SchUsage),
-            observer_cli_lib:exit_processes([StorePid]),
-            quit;
-        pause_or_resume ->
-            erlang:send(RenderPid, pause_or_resume),
-            manager(StorePid, RenderPid, Opts, LastSchWallFlag);
-        {new_interval, NewInterval} ->
-            clean(Resource),
-            start(Opts#view_opts{home = Home#home{interval = NewInterval}});
-        scheduler_usage ->
-            NewSchUsage =
-                case SchUsage of
-                    ?DISABLE ->
-                        ?ENABLE;
-                    ?ENABLE ->
-                        ?DISABLE
-                end,
-            clean(Resource),
-            start(Opts#view_opts{home = Home#home{scheduler_usage = NewSchUsage}});
-        {jump, NewPos} ->
-            NewPages = observer_cli_lib:update_page_pos(CurPage, NewPos, Pages),
-            NewOpts = Opts#view_opts{home = Home#home{pages = NewPages}},
-            start_process_view(StorePid, RenderPid, NewOpts, LastSchWallFlag, false);
-        jump ->
-            start_process_view(StorePid, RenderPid, Opts, LastSchWallFlag, true);
-        {func, Func, Type} ->
-            clean(Resource),
-            start(Opts#view_opts{home = Home#home{func = Func, type = Type}});
-        page_down_top_n ->
-            NewPage = max(CurPage + 1, 1),
-            NewPages = observer_cli_lib:update_page_pos(StorePid, NewPage, Pages),
-            clean(Resource),
-            start(Opts#view_opts{home = Home#home{cur_page = NewPage, pages = NewPages}});
-        page_up_top_n ->
-            NewPage = max(CurPage - 1, 1),
-            NewPages = observer_cli_lib:update_page_pos(StorePid, NewPage, Pages),
-            clean(Resource),
-            start(Opts#view_opts{home = Home#home{cur_page = NewPage, pages = NewPages}});
-        {go_to_pid, Pid} ->
-            clean(Resource),
-            observer_cli_process:start(home, Pid, Opts);
-        _ ->
-            manager(StorePid, RenderPid, Opts, LastSchWallFlag)
+            #home{
+                scheduler_usage = SchUsage
+            }
+    },
+    LastSchWallFlag,
+    _Resource
+) ->
+    erlang:unlink(RenderPid),
+    erlang:send(RenderPid, quit),
+    set_scheduler_wall_time(LastSchWallFlag, SchUsage),
+    observer_cli_lib:exit_processes([StorePid]),
+    quit;
+handle_home_action(pause_or_resume, StorePid, RenderPid, Opts, LastSchWallFlag, _Resource) ->
+    erlang:send(RenderPid, pause_or_resume),
+    manager(StorePid, RenderPid, Opts, LastSchWallFlag);
+handle_home_action(
+    {new_interval, NewInterval},
+    _StorePid,
+    _RenderPid,
+    Opts = #view_opts{home = Home},
+    _LastSchWallFlag,
+    Resource
+) ->
+    restart_home(Opts#view_opts{home = Home#home{interval = NewInterval}}, Resource);
+handle_home_action(
+    scheduler_usage,
+    _StorePid,
+    _RenderPid,
+    Opts = #view_opts{home = Home},
+    _LastSchWallFlag,
+    Resource
+) ->
+    #home{scheduler_usage = SchUsage} = Home,
+    NewSchUsage = toggle_scheduler_usage(SchUsage),
+    restart_home(Opts#view_opts{home = Home#home{scheduler_usage = NewSchUsage}}, Resource);
+handle_home_action(
+    {jump, NewPos},
+    StorePid,
+    RenderPid,
+    Opts = #view_opts{
+        home =
+            Home = #home{
+                cur_page = CurPage,
+                pages = Pages
+            }
+    },
+    LastSchWallFlag,
+    Resource
+) ->
+    NewPages = observer_cli_lib:update_page_pos(CurPage, NewPos, Pages),
+    NewOpts = Opts#view_opts{home = Home#home{pages = NewPages}},
+    start_process_view(StorePid, RenderPid, NewOpts, LastSchWallFlag, Resource, false);
+handle_home_action(jump, StorePid, RenderPid, Opts, LastSchWallFlag, Resource) ->
+    start_process_view(StorePid, RenderPid, Opts, LastSchWallFlag, Resource, true);
+handle_home_action(
+    {func, Func, Type},
+    _StorePid,
+    _RenderPid,
+    Opts = #view_opts{home = Home},
+    _LastSchWallFlag,
+    Resource
+) ->
+    restart_home(Opts#view_opts{home = Home#home{func = Func, type = Type}}, Resource);
+handle_home_action(page_down_top_n, StorePid, _RenderPid, Opts, _LastSchWallFlag, Resource) ->
+    restart_home_page(1, StorePid, Opts, Resource);
+handle_home_action(page_up_top_n, StorePid, _RenderPid, Opts, _LastSchWallFlag, Resource) ->
+    restart_home_page(-1, StorePid, Opts, Resource);
+handle_home_action({go_to_pid, Pid}, _StorePid, _RenderPid, Opts, _LastSchWallFlag, Resource) ->
+    open_process_view(Pid, Opts, Resource);
+handle_home_action(_Action, StorePid, RenderPid, Opts, LastSchWallFlag, _Resource) ->
+    manager(StorePid, RenderPid, Opts, LastSchWallFlag).
+
+toggle_scheduler_usage(SchUsage) ->
+    case SchUsage of
+        ?DISABLE ->
+            ?ENABLE;
+        ?ENABLE ->
+            ?DISABLE
     end.
+
+restart_home_page(Delta, StorePid, Opts = #view_opts{home = Home}, Resource) ->
+    #home{cur_page = CurPage, pages = Pages} = Home,
+    NewPage = observer_cli_lib:next_page(CurPage, Delta),
+    NewPages = observer_cli_lib:update_page_pos(StorePid, NewPage, Pages),
+    restart_home(Opts#view_opts{home = Home#home{cur_page = NewPage, pages = NewPages}}, Resource).
+
+restart_home(Opts, Resource) ->
+    clean(Resource),
+    start(Opts).
 
 render_worker(PsCmd, Manager, Home = #home{scheduler_usage = SchUsage}, AutoRow) ->
     ?output(?CLEAR),
@@ -238,28 +288,17 @@ redraw_running(
     #home{
         interval = Interval,
         func = Func,
-        type = Type,
-        pages = RankPos,
-        cur_page = CurPage,
-        scheduler_usage = SchUsage
+        type = Type
     } =
         Home,
     erlang:cancel_timer(LastTimeRef),
     TerminalRow = observer_cli_lib:get_terminal_rows(AutoRow),
-    {Diffs, Schedulers, NewStats} = node_stats(LastStats, SchUsage),
-    {CPURow, CPULine} = render_scheduler_usage(Schedulers),
-    ProcessRows = max(TerminalRow - 14 - CPURow, 0),
-    TopLen = ProcessRows * CurPage,
-    TopList = get_top_n(Func, Type, Interval, TopLen, IsFirstTime),
-    Text = get_refresh_prompt(Func, Type, Interval, TopLen),
-    MenuLine = observer_cli_lib:render_menu(home, Text),
-    SystemLine = render_system_line(PsCmd, element(1, StableInfo)),
-    MemLine = render_memory_process_line(Diffs, element(2, StableInfo), Interval),
-    {TopNList, RankLine} = render_top_n_view(Type, TopList, ProcessRows, RankPos, CurPage),
-    LastLine = observer_cli_lib:render_last_line(?LAST_LINE),
-    ?output([?CURSOR_TOP, MenuLine, SystemLine, MemLine, CPULine, RankLine, LastLine]),
+    {Snapshot, NewStats} =
+        collect_home_snapshot(PsCmd, Home, StableInfo, LastStats, TerminalRow, IsFirstTime),
+    {TopNList, Lines} = render_home_snapshot(Home, Snapshot),
+    ?output([?CURSOR_TOP | Lines]),
 
-    observer_cli_store:update(StorePid, ProcessRows, TopNList),
+    observer_cli_store:update(StorePid, maps:get(process_rows, Snapshot), TopNList),
     TimeRef = refresh_next_time(Func, Type, Interval),
     receive
         quit ->
@@ -270,13 +309,81 @@ redraw_running(
             redraw_running(PsCmd, StorePid, Home, StableInfo, NewStats, TimeRef, AutoRow, false)
     end.
 
+collect_home_snapshot(PsCmd, Home, StableInfo, LastStats, TerminalRows, IsFirstTime) ->
+    #home{
+        interval = Interval,
+        scheduler_usage = SchUsage
+    } =
+        Home,
+    {Diffs, SchedulerUsage, NewStats} = node_stats(LastStats, SchUsage),
+    ProcessRows = max(
+        TerminalRows - 14 - scheduler_usage_rows(SchedulerUsage), 0
+    ),
+    ProcessRanking = collect_home_processes(Home, ProcessRows, IsFirstTime),
+    Runtime = sample_home_runtime(PsCmd, StableInfo, Diffs, SchedulerUsage, Interval),
+    {maps:merge(Runtime#{process_rows => ProcessRows}, ProcessRanking), NewStats}.
+
+sample_home_runtime(PsCmd, {StableInfo, PortParallelism}, Diffs, SchedulerUsage, Interval) ->
+    #{
+        system_summary => system_summary(PsCmd, StableInfo, get_atom_status()),
+        memory_summary => memory_process_summary(Diffs, PortParallelism, Interval),
+        scheduler_usage => SchedulerUsage
+    }.
+
+collect_home_processes(
+    #home{interval = Interval, func = Func, type = Type, cur_page = CurPage},
+    ProcessRows,
+    IsFirstTime
+) ->
+    TopLen = ProcessRows * CurPage,
+    #{
+        top_processes => collect_top_n(Func, Type, Interval, TopLen, IsFirstTime),
+        refresh_prompt => get_refresh_prompt(Func, Type, Interval, TopLen)
+    }.
+
+render_home_snapshot(Home, Snapshot) ->
+    #home{
+        type = Type,
+        pages = RankPos,
+        cur_page = CurPage
+    } =
+        Home,
+    ProcessRows = maps:get(process_rows, Snapshot),
+    TopList = maps:get(top_processes, Snapshot),
+    Text = maps:get(refresh_prompt, Snapshot),
+    {_, CPULine} = render_scheduler_usage(maps:get(scheduler_usage, Snapshot)),
+    {TopNList, RankLine} = render_top_n_view(Type, TopList, ProcessRows, RankPos, CurPage),
+    {
+        TopNList,
+        [
+            observer_cli_lib:render_top_menu(home, Text),
+            render_home_summary(maps:get(system_summary, Snapshot)),
+            render_home_summary(maps:get(memory_summary, Snapshot)),
+            CPULine,
+            RankLine,
+            render_footer()
+        ]
+    }.
+
+render_footer() ->
+    observer_cli_lib:render_footer(?LAST_LINE).
+
+-ifdef(TEST).
+
 render_system_line(PsCmd, StableInfo) ->
+    render_system_line(PsCmd, StableInfo, get_atom_status()).
+
+render_system_line(PsCmd, StableInfo, AtomStatus) ->
+    render_home_summary(system_summary(PsCmd, StableInfo, AtomStatus)).
+
+-endif.
+
+system_summary(PsCmd, StableInfo, AtomStatus) ->
     {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra, RightLabelExtra,
         RightValueExtra} = home_summary_extras(),
     [Version, SysVersion, ProcLimit, PortLimit, EtsLimit] = StableInfo,
     ActiveTask = erlang:statistics(total_active_tasks),
     {ContextSwitch, _} = erlang:statistics(context_switches),
-    AtomStatus = get_atom_status(),
     Reductions = erlang:statistics(reductions),
     {PortWarning, ProcWarning, PortCount, ProcCount} =
         get_port_proc_info(PortLimit, ProcLimit),
@@ -299,62 +406,92 @@ render_system_line(PsCmd, StableInfo) ->
             _ ->
                 ["--", "--"]
         end,
-    Title =
-        ?render([
-            ?W(SysVersion, observer_cli_lib:layout_width() - 3),
-            ?NEW_LINE,
-            ?GRAY_BG,
-            ?W("System", 10 + LeftLabelExtra),
-            ?W("Count/Limit", 21 + LeftValueExtra),
-            ?W("System", 25 + MiddleLabelExtra),
-            ?W("Status", 21 + MiddleValueExtra),
-            ?W("Stat Info", 20 + RightLabelExtra),
-            ?W("Size", 25 + RightValueExtra)
-        ]),
-    Row1 =
-        ?render([
-            ?W("Proc Count", 10 + LeftLabelExtra),
-            ?W2(ProcWarning, ProcCount, 22 + LeftValueExtra),
-            ?W(" Version", 26 + MiddleLabelExtra),
-            ?W(Version, 21 + MiddleValueExtra),
-            ?W("Active Task", 20 + RightLabelExtra),
-            ?W(ActiveTask, 25 + RightValueExtra),
-            ?NEW_LINE,
-            ?W("Port Count", 10 + LeftLabelExtra),
-            ?W2(PortWarning, PortCount, 22 + LeftValueExtra),
-            ?W(" ps -o pcpu", 26 + MiddleLabelExtra),
-            ?W([CpuPsV, "%"], 21 + MiddleValueExtra),
-            ?W("Context Switch", 20 + RightLabelExtra),
-            ?W(ContextSwitch, 24 + RightValueExtra)
-        ]),
     {Reds, AddReds} = Reductions,
-    Row2 =
-        case AtomStatus of
-            {ok, AtomLimit, AtomCount} ->
-                {AtomWarning, Atom} = format_atom_info(AtomLimit, AtomCount),
-                ?render([
-                    ?UNDERLINE,
-                    ?W("Atom Count", 10 + LeftLabelExtra),
-                    ?W2(AtomWarning, Atom, 22 + LeftValueExtra),
-                    ?W(" ps -o pmem", 26 + MiddleLabelExtra),
-                    ?W([MemPsV, "%"], 21 + MiddleValueExtra),
-                    ?W("Reds(Total/SinceLastCall)", 20 + RightLabelExtra),
-                    ?W([integer_to_list(Reds), "/", integer_to_list(AddReds)], 24 + RightValueExtra)
-                ]);
-            {error, unsupported} ->
-                ?render([
-                    ?UNDERLINE,
-                    ?W("Ets Limit", 10 + LeftLabelExtra),
-                    ?W(EtsLimit, 21 + LeftValueExtra),
-                    ?W(" ps -o pmem", 25 + MiddleLabelExtra),
-                    ?W([MemPsV, "%"], 21 + MiddleValueExtra),
-                    ?W("Reductions", 20 + RightLabelExtra),
-                    ?W(Reductions, 24 + RightValueExtra)
-                ])
-        end,
-    [Title, Row1, Row2].
+    ReductionsText = [integer_to_list(Reds), "/", integer_to_list(AddReds)],
+    [
+        [
+            {normal, [{SysVersion, observer_cli_lib:layout_width() - 3}]},
+            {?GRAY_BG, [
+                {"System", 10 + LeftLabelExtra},
+                {"Count/Limit", 21 + LeftValueExtra},
+                {"System", 25 + MiddleLabelExtra},
+                {"Status", 21 + MiddleValueExtra},
+                {"Stat Info", 20 + RightLabelExtra},
+                {"Size", 25 + RightValueExtra}
+            ]}
+        ],
+        [
+            {normal, [
+                {"Proc Count", 10 + LeftLabelExtra},
+                {ProcWarning, ProcCount, 22 + LeftValueExtra},
+                {" Version", 26 + MiddleLabelExtra},
+                {Version, 21 + MiddleValueExtra},
+                {"Active Task", 20 + RightLabelExtra},
+                {ActiveTask, 25 + RightValueExtra}
+            ]},
+            {normal, [
+                {"Port Count", 10 + LeftLabelExtra},
+                {PortWarning, PortCount, 22 + LeftValueExtra},
+                {" ps -o pcpu", 26 + MiddleLabelExtra},
+                {[CpuPsV, "%"], 21 + MiddleValueExtra},
+                {"Context Switch", 20 + RightLabelExtra},
+                {ContextSwitch, 24 + RightValueExtra}
+            ]}
+        ],
+        [
+            system_atom_summary_row(
+                AtomStatus,
+                EtsLimit,
+                MemPsV,
+                ReductionsText,
+                {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra,
+                    RightLabelExtra, RightValueExtra}
+            )
+        ]
+    ].
+
+system_atom_summary_row(
+    {ok, AtomLimit, AtomCount},
+    _EtsLimit,
+    MemPsV,
+    ReductionsText,
+    {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra, RightLabelExtra,
+        RightValueExtra}
+) ->
+    {AtomWarning, Atom} = format_atom_info(AtomLimit, AtomCount),
+    {?UNDERLINE, [
+        {"Atom Count", 10 + LeftLabelExtra},
+        {AtomWarning, Atom, 22 + LeftValueExtra},
+        {" ps -o pmem", 26 + MiddleLabelExtra},
+        {[MemPsV, "%"], 21 + MiddleValueExtra},
+        {"Reds(Total/SinceLastCall)", 20 + RightLabelExtra},
+        {ReductionsText, 24 + RightValueExtra}
+    ]};
+system_atom_summary_row(
+    {error, unsupported},
+    EtsLimit,
+    MemPsV,
+    ReductionsText,
+    {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra, RightLabelExtra,
+        RightValueExtra}
+) ->
+    {?UNDERLINE, [
+        {"Ets Limit", 10 + LeftLabelExtra},
+        {EtsLimit, 21 + LeftValueExtra},
+        {" ps -o pmem", 25 + MiddleLabelExtra},
+        {[MemPsV, "%"], 21 + MiddleValueExtra},
+        {"Reductions", 20 + RightLabelExtra},
+        {ReductionsText, 24 + RightValueExtra}
+    ]}.
+
+-ifdef(TEST).
 
 render_memory_process_line(MemSum, PortParallelism, Interval) ->
+    render_home_summary(memory_process_summary(MemSum, PortParallelism, Interval)).
+
+-endif.
+
+memory_process_summary(MemSum, PortParallelism, Interval) ->
     {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra, RightLabelExtra,
         RightValueExtra} = home_summary_extras(),
     RunQ = erlang:statistics(run_queue),
@@ -387,57 +524,87 @@ render_memory_process_line(MemSum, PortParallelism, Interval) ->
     BinMemPercent = observer_cli_lib:to_percent(BinMem / TotalMem),
     CodeMemPercent = observer_cli_lib:to_percent(CodeMem / TotalMem),
     EtsMemPercent = observer_cli_lib:to_percent(EtsMem / TotalMem),
+    [
+        [
+            {?GRAY_BG, [
+                {"Mem Type", 10 + LeftLabelExtra},
+                {"Size", 21 + LeftValueExtra},
+                {"Mem Type", 25 + MiddleLabelExtra},
+                {"Size", 21 + MiddleValueExtra},
+                {["IO/GC:(", integer_to_binary(Interval), "ms)"], 20 + RightLabelExtra},
+                {"Total/Increments", 25 + RightValueExtra}
+            ]}
+        ],
+        [
+            {normal, [
+                {"Total", 10 + LeftLabelExtra},
+                {{byte, TotalMem}, 12},
+                {"100.0%", 6 + LeftValueExtra},
+                {"Binary", 25 + MiddleLabelExtra},
+                {{byte, BinMem}, 12},
+                {BinMemPercent, 6 + MiddleValueExtra},
+                {"IO Output", 20 + RightLabelExtra},
+                {BytesOut, 25 + RightValueExtra}
+            ]},
+            {normal, [
+                {"Process", 10 + LeftLabelExtra},
+                {{byte, ProcMem}, 12},
+                {ProcMemPercent, 6 + LeftValueExtra},
+                {"Code", 25 + MiddleLabelExtra},
+                {{byte, CodeMem}, 12},
+                {CodeMemPercent, 6 + MiddleValueExtra},
+                {"IO Input", 20 + RightLabelExtra},
+                {BytesIn, 25 + RightValueExtra}
+            ]},
+            {normal, [
+                {"Atom", 10 + LeftLabelExtra},
+                {{byte, AtomMem}, 12},
+                {AtomMemPercent, 6 + LeftValueExtra},
+                {"Port Parallelism (+spp)", 25 + MiddleLabelExtra},
+                {PortParallelism, 21 + MiddleValueExtra},
+                {"Gc Count", 20 + RightLabelExtra},
+                {GcCount, 25 + RightValueExtra}
+            ]},
+            {normal, [
+                {"Ets/" ++ erlang:integer_to_list(EtsLen), 10 + LeftLabelExtra},
+                {{byte, EtsMem}, 12},
+                {EtsMemPercent, 6 + LeftValueExtra},
+                {LogKey, 25 + MiddleLabelExtra},
+                {Queue, 21 + MiddleValueExtra},
+                {"Gc Words Reclaimed", 20 + RightLabelExtra},
+                {GcWordsReclaimed, 24 + RightValueExtra}
+            ]}
+        ]
+    ].
 
-    Title =
-        ?render([
-            ?GRAY_BG,
-            ?W("Mem Type", 10 + LeftLabelExtra),
-            ?W("Size", 21 + LeftValueExtra),
-            ?W("Mem Type", 25 + MiddleLabelExtra),
-            ?W("Size", 21 + MiddleValueExtra),
-            ?W(["IO/GC:(", integer_to_binary(Interval), "ms)"], 20 + RightLabelExtra),
-            ?W("Total/Increments", 24 + RightValueExtra)
-        ]),
-    Row =
-        ?render([
-            ?W("Total", 10 + LeftLabelExtra),
-            ?W({byte, TotalMem}, 12),
-            ?W("100.0%", 6 + LeftValueExtra),
-            ?W("Binary", 25 + MiddleLabelExtra),
-            ?W({byte, BinMem}, 12),
-            ?W(BinMemPercent, 6 + MiddleValueExtra),
-            ?W("IO Output", 20 + RightLabelExtra),
-            ?W(BytesOut, 25 + RightValueExtra),
-            ?NEW_LINE,
-            ?W("Process", 10 + LeftLabelExtra),
-            ?W({byte, ProcMem}, 12),
-            ?W(ProcMemPercent, 6 + LeftValueExtra),
-            ?W("Code", 25 + MiddleLabelExtra),
-            ?W({byte, CodeMem}, 12),
-            ?W(CodeMemPercent, 6 + MiddleValueExtra),
-            ?W("IO Input", 20 + RightLabelExtra),
-            ?W(BytesIn, 25 + RightValueExtra),
-            ?NEW_LINE,
-            ?W("Atom", 10 + LeftLabelExtra),
-            ?W({byte, AtomMem}, 12),
-            ?W(AtomMemPercent, 6 + LeftValueExtra),
-            ?W("Port Parallelism (+spp)", 25 + MiddleLabelExtra),
-            ?W(PortParallelism, 21 + MiddleValueExtra),
-            ?W("Gc Count", 20 + RightLabelExtra),
-            ?W(GcCount, 25 + RightValueExtra),
-            ?NEW_LINE,
-            ?W("Ets/" ++ erlang:integer_to_list(EtsLen), 10 + LeftLabelExtra),
-            ?W({byte, EtsMem}, 12),
-            ?W(EtsMemPercent, 6 + LeftValueExtra),
-            ?W(LogKey, 25 + MiddleLabelExtra),
-            ?W(Queue, 21 + MiddleValueExtra),
-            ?W("Gc Words Reclaimed", 20 + RightLabelExtra),
-            ?W(GcWordsReclaimed, 24 + RightValueExtra)
-        ]),
-    [Title, Row].
+render_home_summary(Blocks) ->
+    [render_home_summary_block(Block) || Block <- Blocks].
+
+render_home_summary_block(Rows) ->
+    ?render(join_home_summary_rows(Rows)).
+
+join_home_summary_rows([]) ->
+    [];
+join_home_summary_rows([Row]) ->
+    render_home_summary_row(Row);
+join_home_summary_rows([Row | Rows]) ->
+    render_home_summary_row(Row) ++ [?NEW_LINE | join_home_summary_rows(Rows)].
+
+render_home_summary_row({normal, Cells}) ->
+    render_home_summary_cells(Cells);
+render_home_summary_row({Style, Cells}) ->
+    [Style | render_home_summary_cells(Cells)].
+
+render_home_summary_cells(Cells) ->
+    [render_home_summary_cell(Cell) || Cell <- Cells].
+
+render_home_summary_cell({Value, Width}) ->
+    ?W(Value, Width);
+render_home_summary_cell({Color, Value, Width}) ->
+    ?W2(Color, Value, Width).
 
 home_summary_extras() ->
-    Extra = erlang:max(observer_cli_lib:layout_width() - (?COLUMN + 6), 0),
+    Extra = observer_cli_lib:layout_extra_width(observer_cli_lib:layout_base_width() + 1),
     PerColumn = Extra div 6,
     Remainder = Extra rem 6,
     RawMiddleValueExtra = PerColumn + extra_bit(Remainder, 4),
@@ -456,6 +623,23 @@ extra_bit(Rem, Pos) when Rem >= Pos ->
 extra_bit(_Rem, _Pos) ->
     0.
 
+scheduler_usage_rows(undefined) ->
+    0;
+scheduler_usage_rows(SchedulerUsage) ->
+    scheduler_usage_rows_by_count(erlang:length(SchedulerUsage)).
+
+scheduler_usage_rows_by_count(SchedulerNum) when SchedulerNum < 8 ->
+    ceil_div(SchedulerNum, 2);
+scheduler_usage_rows_by_count(SchedulerNum) when SchedulerNum =< 100 ->
+    ceil_div(SchedulerNum, 4);
+scheduler_usage_rows_by_count(SchedulerNum) ->
+    ceil_div(SchedulerNum, 10).
+
+ceil_div(0, _Divisor) ->
+    0;
+ceil_div(Number, Divisor) ->
+    (Number + Divisor - 1) div Divisor.
+
 render_scheduler_usage(undefined) ->
     {0, []};
 render_scheduler_usage(SchedulerUsage) ->
@@ -464,13 +648,7 @@ render_scheduler_usage(SchedulerUsage) ->
 
 %% < 8 core split 2 part
 render_scheduler_usage(SchedulerUsage, SchedulerNum) when SchedulerNum < 8 ->
-    Column =
-        case SchedulerNum rem 2 =:= 0 of
-            true ->
-                SchedulerNum div 2;
-            false ->
-                SchedulerNum div 2 + 1
-        end,
+    Column = scheduler_usage_rows_by_count(SchedulerNum),
     CPU =
         [
             begin
@@ -490,13 +668,7 @@ render_scheduler_usage(SchedulerUsage, SchedulerNum) when SchedulerNum < 8 ->
     {Column, pad_scheduler_lines(CPU)};
 %% 100 >= scheduler >= 8 split 4 part
 render_scheduler_usage(SchedulerUsage, SchedulerNum) when SchedulerNum =< 100 ->
-    Column =
-        case SchedulerNum rem 4 =:= 0 of
-            true ->
-                SchedulerNum div 4;
-            false ->
-                SchedulerNum div 4 + 1
-        end,
+    Column = scheduler_usage_rows_by_count(SchedulerNum),
     CPU =
         [
             begin
@@ -542,13 +714,7 @@ render_scheduler_usage(SchedulerUsage, SchedulerNum) when SchedulerNum =< 100 ->
     {Column, pad_scheduler_lines(CPU)};
 %% scheduler > 100 don't show process bar.
 render_scheduler_usage(SchedulerUsage, SchedulerNum) ->
-    Column =
-        case SchedulerNum rem 10 =:= 0 of
-            true ->
-                SchedulerNum div 10;
-            false ->
-                SchedulerNum div 10 + 1
-        end,
+    Column = scheduler_usage_rows_by_count(SchedulerNum),
     CPU =
         [
             begin
@@ -641,181 +807,137 @@ transform_seq(Seq, Column, Total) ->
 render_top_n_view(Type, List, Num, Pages, Page) ->
     render_top_n_view(Type, List, Num, Pages, Page, observer_cli_lib:layout_width()).
 
-render_top_n_view(memory, MemoryList, Num, Pages, Page, LayoutWidth) ->
-    {NameWidth, CurrentTitleWidth, CurrentWidth} = top_n_text_widths(45, 32, 33, LayoutWidth),
-    Title =
-        ?render([
-            ?W2(?GRAY_BG, "No | Pid", 16),
-            ?W2(?RED_BG, "     Memory", 14),
-            ?W(?GRAY_BG, "Name|>Label|>Initial Call", NameWidth),
-            ?W(?GRAY_BG, "    Reductions", 14),
-            ?W(?GRAY_BG, " MsgQueue", 10),
-            ?W(?GRAY_BG, "Current Function", CurrentTitleWidth)
-        ]),
-    {Start, ChoosePos} =
-        observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(MemoryList)),
+render_top_n_view(Type, List, Num, Pages, Page, LayoutWidth) ->
+    Spec = top_n_spec(Type),
+    #{text_widths := {NameBaseWidth, CurrentTitleBaseWidth, CurrentBaseWidth}} = Spec,
+    {NameWidth, CurrentTitleWidth, CurrentWidth} =
+        top_n_text_widths(NameBaseWidth, CurrentTitleBaseWidth, CurrentBaseWidth, LayoutWidth),
+    Title = render_top_n_title(Spec, NameWidth, CurrentTitleWidth),
+    {Start, ChoosePos} = observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(List)),
     FormatFunc =
         fun(Item, {Acc, Acc1, Pos}) ->
-            {Pid, MemVal, CurFun, NameOrCall} = get_top_n_info(Item),
-            {Reductions, MsgQueueLen} = get_pid_info(Pid, [reductions, message_queue_len]),
-            Format = get_rank_format(memory, ChoosePos, Pos, NameWidth, CurrentWidth),
-            R = io_lib:format(
-                Format,
-                [
-                    Pos,
-                    erlang:pid_to_list(Pid),
-                    observer_cli_lib:to_byte(MemVal),
-                    NameOrCall,
-                    observer_cli_lib:to_list(Reductions),
-                    observer_cli_lib:to_list(MsgQueueLen),
-                    CurFun
-                ]
+            {Pid, Row} = render_top_n_row(
+                Type, Spec, Item, ChoosePos, Pos, NameWidth, CurrentWidth
             ),
-            {[R | Acc], [{Pos, Pid} | Acc1], Pos + 1}
+            {[Row | Acc], [{Pos, Pid} | Acc1], Pos + 1}
         end,
-    {Rows, PidList} = top_n_rows(FormatFunc, Start, lists:sublist(MemoryList, Start, Num)),
-    {PidList, [Title | lists:reverse(Rows)]};
-render_top_n_view(binary_memory, MemoryList, Num, Pages, Page, LayoutWidth) ->
-    {NameWidth, CurrentTitleWidth, CurrentWidth} = top_n_text_widths(45, 32, 33, LayoutWidth),
-    Title =
-        ?render([
-            ?W2(?GRAY_BG, "No | Pid", 16),
-            ?W2(?RED_BG, "  BinMemory", 14),
-            ?W(?GRAY_BG, "Name|>Label|>Initial Call", NameWidth),
-            ?W(?GRAY_BG, "    Reductions", 14),
-            ?W(?GRAY_BG, " MsgQueue", 10),
-            ?W(?GRAY_BG, "Current Function", CurrentTitleWidth)
-        ]),
-    {Start, ChoosePos} =
-        observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(MemoryList)),
-    FormatFunc =
-        fun(Item, {Acc, Acc1, Pos}) ->
-            {Pid, MemVal, CurFun, NameOrCall} = get_top_n_info(Item),
-            {Reductions, MsgQueueLen} = get_pid_info(Pid, [reductions, message_queue_len]),
-            Format = get_rank_format(binary_memory, ChoosePos, Pos, NameWidth, CurrentWidth),
-            R = io_lib:format(
-                Format,
-                [
-                    Pos,
-                    pid_to_list(Pid),
-                    observer_cli_lib:to_byte(MemVal),
-                    NameOrCall,
-                    observer_cli_lib:to_list(Reductions),
-                    observer_cli_lib:to_list(MsgQueueLen),
-                    CurFun
-                ]
-            ),
-            {[R | Acc], [{Pos, Pid} | Acc1], Pos + 1}
-        end,
-    {Rows, PidList} = top_n_rows(FormatFunc, Start, lists:sublist(MemoryList, Start, Num)),
-    {PidList, [Title | lists:reverse(Rows)]};
-render_top_n_view(reductions, ReductionList, Num, Pages, Page, LayoutWidth) ->
-    {NameWidth, CurrentTitleWidth, CurrentWidth} = top_n_text_widths(45, 33, 34, LayoutWidth),
-    Title =
-        ?render([
-            ?W2(?GRAY_BG, "No | Pid", 16),
-            ?W2(?RED_BG, "   Reductions", 15),
-            ?W(?GRAY_BG, "Name|>Label|>Initial Call", NameWidth),
-            ?W(?GRAY_BG, "      Memory", 13),
-            ?W(?GRAY_BG, " MsgQueue", 10),
-            ?W(?GRAY_BG, "Current Function", CurrentTitleWidth)
-        ]),
-    {Start, ChoosePos} =
-        observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(ReductionList)),
-    FormatFunc =
-        fun(Item, {Acc, Acc1, Pos}) ->
-            {Pid, Reductions, CurFun, NameOrCall} = get_top_n_info(Item),
-            {Memory, MsgQueueLen} = get_pid_info(Pid, [memory, message_queue_len]),
-            Format = get_rank_format(reductions, ChoosePos, Pos, NameWidth, CurrentWidth),
-            R = io_lib:format(
-                Format,
-                [
-                    Pos,
-                    pid_to_list(Pid),
-                    observer_cli_lib:to_list(Reductions),
-                    NameOrCall,
-                    observer_cli_lib:to_byte(Memory),
-                    observer_cli_lib:to_list(MsgQueueLen),
-                    CurFun
-                ]
-            ),
-            {[R | Acc], [{Pos, Pid} | Acc1], Pos + 1}
-        end,
-    {Rows, PidList} = top_n_rows(FormatFunc, Start, lists:sublist(ReductionList, Start, Num)),
-    {PidList, [Title | lists:reverse(Rows)]};
-render_top_n_view(total_heap_size, HeapList, Num, Pages, Page, LayoutWidth) ->
-    {NameWidth, CurrentTitleWidth, CurrentWidth} = top_n_text_widths(45, 32, 33, LayoutWidth),
-    Title =
-        ?render([
-            ?W2(?GRAY_BG, "No | Pid", 16),
-            ?W2(?RED_BG, " TotalHeapSize", 14),
-            ?W(?GRAY_BG, "Name|>Label|>Initial Call", NameWidth),
-            ?W(?GRAY_BG, "    Reductions", 14),
-            ?W(?GRAY_BG, " MsgQueue", 10),
-            ?W(?GRAY_BG, "Current Function", CurrentTitleWidth)
-        ]),
-    {Start, ChoosePos} = observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(HeapList)),
-    FormatFunc =
-        fun(Item, {Acc, Acc1, Pos}) ->
-            {Pid, HeapSize, CurFun, NameOrCall} = get_top_n_info(Item),
-            {Reductions, MsgQueueLen} = get_pid_info(Pid, [reductions, message_queue_len]),
-            Format = get_rank_format(total_heap_size, ChoosePos, Pos, NameWidth, CurrentWidth),
-            R = io_lib:format(
-                Format,
-                [
-                    Pos,
-                    pid_to_list(Pid),
-                    observer_cli_lib:to_byte(HeapSize),
-                    NameOrCall,
-                    observer_cli_lib:to_list(Reductions),
-                    observer_cli_lib:to_list(MsgQueueLen),
-                    CurFun
-                ]
-            ),
-            {[R | Acc], [{Pos, Pid} | Acc1], Pos + 1}
-        end,
-    {Rows, PidList} = top_n_rows(FormatFunc, Start, lists:sublist(HeapList, Start, Num)),
-    {PidList, [Title | lists:reverse(Rows)]};
-render_top_n_view(message_queue_len, MQLenList, Num, Pages, Page, LayoutWidth) ->
-    {NameWidth, CurrentTitleWidth, CurrentWidth} = top_n_text_widths(44, 33, 34, LayoutWidth),
-    Title =
-        ?render([
-            ?W2(?GRAY_BG, "No | Pid", 16),
-            ?W2(?RED_BG, " MsgQueue", 11),
-            ?W(?GRAY_BG, "Name|>Label|>Initial Call", NameWidth),
-            ?W(?GRAY_BG, "      Memory", 13),
-            ?W(?GRAY_BG, "    Reductions", 14),
-            ?W(?GRAY_BG, "Current Function", CurrentTitleWidth)
-        ]),
-    {Start, ChoosePos} = observer_cli_lib:get_pos(Page, Num, Pages, erlang:length(MQLenList)),
-    FormatFunc =
-        fun(Item, {Acc, Acc1, Pos}) ->
-            {Pid, MQLen, CurFun, NameOrCall} = get_top_n_info(Item),
-            {Reductions, Memory} = get_pid_info(Pid, [reductions, memory]),
-            Format = get_rank_format(message_queue_len, ChoosePos, Pos, NameWidth, CurrentWidth),
-            R = io_lib:format(
-                Format,
-                [
-                    Pos,
-                    pid_to_list(Pid),
-                    observer_cli_lib:to_list(MQLen),
-                    NameOrCall,
-                    observer_cli_lib:to_byte(Memory),
-                    observer_cli_lib:to_list(Reductions),
-                    CurFun
-                ]
-            ),
-            {[R | Acc], [{Pos, Pid} | Acc1], Pos + 1}
-        end,
-    {Rows, PidList} = top_n_rows(FormatFunc, Start, lists:sublist(MQLenList, Start, Num)),
+    {Rows, PidList} = top_n_rows(FormatFunc, Start, lists:sublist(List, Start, Num)),
     {PidList, [Title | lists:reverse(Rows)]}.
+
+top_n_spec(memory) ->
+    #{
+        text_widths => {45, 32, 33},
+        metric_columns => [
+            {"     Memory", 14},
+            {"    Reductions", 14},
+            {" MsgQueue", 10}
+        ],
+        row_formats => {"~13.13s ", "~14.14s", " ~-9.9s"}
+    };
+top_n_spec(binary_memory) ->
+    #{
+        text_widths => {45, 32, 33},
+        metric_columns => [
+            {"  BinMemory", 14},
+            {"    Reductions", 14},
+            {" MsgQueue", 10}
+        ],
+        row_formats => {"~13.13s ", "~14.14s", " ~-9.9s"}
+    };
+top_n_spec(reductions) ->
+    #{
+        text_widths => {45, 33, 34},
+        metric_columns => [
+            {"   Reductions", 15},
+            {"      Memory", 13},
+            {" MsgQueue", 10}
+        ],
+        row_formats => {"~-15.15s", "~12.12s", " ~-9.9s"}
+    };
+top_n_spec(total_heap_size) ->
+    #{
+        text_widths => {45, 32, 33},
+        metric_columns => [
+            {" TotalHeapSize", 14},
+            {"    Reductions", 14},
+            {" MsgQueue", 10}
+        ],
+        row_formats => {"~13.13s ", "~14.14s", " ~-9.9s"}
+    };
+top_n_spec(message_queue_len) ->
+    #{
+        text_widths => {44, 33, 34},
+        metric_columns => [
+            {" MsgQueue", 11},
+            {"      Memory", 13},
+            {"    Reductions", 14}
+        ],
+        row_formats => {"~-11.11s", "~13.13s", " ~-13.13s"}
+    }.
+
+render_top_n_title(Spec, NameWidth, CurrentTitleWidth) ->
+    #{
+        metric_columns := [
+            {ValueTitle, ValueWidth},
+            {MiddleTitle, MiddleWidth},
+            {RightTitle, RightWidth}
+        ]
+    } = Spec,
+    ?render([
+        ?W2(?GRAY_BG, "No | Pid", 16),
+        ?W2(?RED_BG, ValueTitle, ValueWidth),
+        ?W(?GRAY_BG, "Name|>Label|>Initial Call", NameWidth),
+        ?W(?GRAY_BG, MiddleTitle, MiddleWidth),
+        ?W(?GRAY_BG, RightTitle, RightWidth),
+        ?W(?GRAY_BG, "Current Function", CurrentTitleWidth)
+    ]).
+
+render_top_n_row(Type, Spec, Item, ChoosePos, Pos, NameWidth, CurrentWidth) ->
+    {Pid, Val, CurFun, NameOrCall} = get_top_n_info(Item),
+    {Value, Middle, Right} = top_n_row_values(Type, Pid, Val),
+    Format = get_rank_format(Spec, ChoosePos, Pos, NameWidth, CurrentWidth),
+    Row = io_lib:format(
+        Format,
+        [
+            Pos,
+            erlang:pid_to_list(Pid),
+            Value,
+            NameOrCall,
+            Middle,
+            Right,
+            CurFun
+        ]
+    ),
+    {Pid, Row}.
+
+top_n_row_values(reductions, Pid, Reductions) ->
+    {Memory, MsgQueueLen} = get_pid_info(Pid, [memory, message_queue_len]),
+    {
+        observer_cli_lib:to_list(Reductions),
+        observer_cli_lib:to_byte(Memory),
+        observer_cli_lib:to_list(MsgQueueLen)
+    };
+top_n_row_values(message_queue_len, Pid, MQLen) ->
+    {Reductions, Memory} = get_pid_info(Pid, [reductions, memory]),
+    {
+        observer_cli_lib:to_list(MQLen),
+        observer_cli_lib:to_byte(Memory),
+        observer_cli_lib:to_list(Reductions)
+    };
+top_n_row_values(_Type, Pid, Bytes) ->
+    {Reductions, MsgQueueLen} = get_pid_info(Pid, [reductions, message_queue_len]),
+    {
+        observer_cli_lib:to_byte(Bytes),
+        observer_cli_lib:to_list(Reductions),
+        observer_cli_lib:to_list(MsgQueueLen)
+    }.
 
 top_n_rows(FormatFunc, Start, List) ->
     {Row, PidList, _} = lists:foldl(FormatFunc, {[], [], Start}, List),
     {Row, PidList}.
 
 top_n_text_widths(NameWidth, CurrentTitleWidth, CurrentWidth, LayoutWidth) ->
-    Extra = erlang:max(LayoutWidth - (?COLUMN + 5), 0),
+    Extra = observer_cli_lib:layout_extra_width(LayoutWidth, observer_cli_lib:layout_base_width()),
     NameExtra = Extra div 2,
     CurrentExtra = Extra - NameExtra,
     {NameWidth + NameExtra, CurrentTitleWidth + CurrentExtra, CurrentWidth + CurrentExtra}.
@@ -826,21 +948,11 @@ notify_pause_status() ->
         "or q to quit \e[0m\n"
     ).
 
-get_rank_format(Type, Pos, RankPos, NameWidth, CurrentWidth) ->
+get_rank_format(Spec, ChoosePos, Pos, NameWidth, CurrentWidth) ->
+    #{row_formats := {ValueFormat, MiddleFormat, RightFormat}} = Spec,
     {SelectedFormat, NormalFormat} =
-        case Type of
-            memory ->
-                rank_format("~13.13s ", "~14.14s", " ~-9.9s", NameWidth, CurrentWidth);
-            binary_memory ->
-                rank_format("~13.13s ", "~14.14s", " ~-9.9s", NameWidth, CurrentWidth);
-            total_heap_size ->
-                rank_format("~13.13s ", "~14.14s", " ~-9.9s", NameWidth, CurrentWidth);
-            reductions ->
-                rank_format("~-15.15s", "~12.12s", " ~-9.9s", NameWidth, CurrentWidth);
-            message_queue_len ->
-                rank_format("~-11.11s", "~13.13s", " ~-13.13s", NameWidth, CurrentWidth)
-        end,
-    case Pos =:= RankPos of
+        rank_format(ValueFormat, MiddleFormat, RightFormat, NameWidth, CurrentWidth),
+    case Pos =:= ChoosePos of
         true ->
             SelectedFormat;
         false ->
@@ -870,7 +982,7 @@ rank_format(ValueFormat, MidFormat, QueueFormat, NameWidth, CurrentWidth) ->
         ],
     Selected =
         [
-            "|\e[42m~-3.3w|~-12.12s|",
+            "|\e[7m~-3.3w|~-12.12s|",
             ValueFormat,
             "|~-",
             NameBin,
@@ -884,7 +996,7 @@ rank_format(ValueFormat, MidFormat, QueueFormat, NameWidth, CurrentWidth) ->
             CurrentBin,
             ".",
             CurrentBin,
-            "s\e[49m|~n"
+            "s\e[0m|~n"
         ],
     {lists:flatten(Selected), lists:flatten(Normal)}.
 
@@ -1037,39 +1149,48 @@ get_pid_info(Pid, Keys) ->
             {Val1, Val2}
     end.
 
-get_top_n(proc_window, Type, Interval, Rows, IsFirstTime) when not IsFirstTime ->
+collect_top_n(proc_window, Type, Interval, Rows, IsFirstTime) when not IsFirstTime ->
     recon:proc_window(Type, Rows, Interval);
-get_top_n(_Func, Type, _Interval, Rows, _FirstTime) ->
+collect_top_n(_Func, Type, _Interval, Rows, _FirstTime) ->
     recon:proc_count(Type, Rows).
 
 connect_error(Prompt, Node) ->
-    Prop = <<?RED/binary, Prompt/binary, ?RESET/binary>>,
-    ?output(Prop, [Node]).
+    ?output(observer_cli_lib:ansi_red(Prompt), [Node]).
 
 start_process_view(
     StorePid,
     RenderPid,
-    Opts = #view_opts{home = Home},
+    Opts,
     LastSchWallFlag,
+    Resource,
     AutoJump
 ) ->
+    case select_home_process(StorePid, Opts, AutoJump) of
+        {ok, ChoosePid} ->
+            open_process_view(ChoosePid, Opts, Resource);
+        error ->
+            manager(StorePid, RenderPid, Opts, LastSchWallFlag)
+    end.
+
+select_home_process(StorePid, #view_opts{home = Home}, AutoJump) ->
     #home{
         cur_page = CurPage,
-        pages = Pages,
-        scheduler_usage = SchUsage
+        pages = Pages
     } =
         Home,
     {_, CurPos} = lists:keyfind(CurPage, 1, Pages),
     case observer_cli_store:lookup_pos(StorePid, CurPos) of
         {CurPos, ChoosePid} ->
-            clean([RenderPid, StorePid, LastSchWallFlag, SchUsage]),
-            observer_cli_process:start(home, ChoosePid, Opts);
+            {ok, ChoosePid};
         {_, ChoosePid} when AutoJump ->
-            clean([RenderPid, StorePid, LastSchWallFlag, SchUsage]),
-            observer_cli_process:start(home, ChoosePid, Opts);
+            {ok, ChoosePid};
         _ ->
-            manager(StorePid, RenderPid, Opts, LastSchWallFlag)
+            error
     end.
+
+open_process_view(Pid, Opts, Resource) ->
+    clean(Resource),
+    observer_cli_process:start(home, Pid, Opts).
 
 set_scheduler_wall_time(_Flag, ?DISABLE) ->
     false;
@@ -1084,22 +1205,28 @@ check_auto_row() ->
             false
     end.
 
-node_stats({LastIn, LastOut, LastGCs, LastWords, LastScheduleWall}, SchUsage) ->
-    New = {In, Out, GCs, Words, ScheduleWall} = get_incremental_stats(SchUsage),
+node_stats(LastStats, SchUsage) ->
+    New = get_incremental_stats(SchUsage),
+    {
+        io_gc_stats_diff(LastStats, New),
+        scheduler_usage_diff(LastStats, New),
+        New
+    }.
+
+io_gc_stats_diff({LastIn, LastOut, LastGCs, LastWords, _}, {In, Out, GCs, Words, _}) ->
     BytesInDiff = In - LastIn,
     BytesOutDiff = Out - LastOut,
     GCCountDiff = GCs - LastGCs,
     GCWordsDiff = Words - LastWords,
     {
-        {
-            [observer_cli_lib:to_byte(In), "/", observer_cli_lib:to_byte(BytesInDiff)],
-            [observer_cli_lib:to_byte(Out), "/", observer_cli_lib:to_byte(BytesOutDiff)],
-            [integer_to_list(GCs), "/", integer_to_list(GCCountDiff)],
-            [integer_to_list(Words), "/", integer_to_list(GCWordsDiff)]
-        },
-        recon_lib:scheduler_usage_diff(LastScheduleWall, ScheduleWall),
-        New
+        [observer_cli_lib:to_byte(In), "/", observer_cli_lib:to_byte(BytesInDiff)],
+        [observer_cli_lib:to_byte(Out), "/", observer_cli_lib:to_byte(BytesOutDiff)],
+        [integer_to_list(GCs), "/", integer_to_list(GCCountDiff)],
+        [integer_to_list(Words), "/", integer_to_list(GCWordsDiff)]
     }.
+
+scheduler_usage_diff({_, _, _, _, LastScheduleWall}, {_, _, _, _, ScheduleWall}) ->
+    recon_lib:scheduler_usage_diff(LastScheduleWall, ScheduleWall).
 
 get_incremental_stats(SchUsage) ->
     {{input, In}, {output, Out}} = erlang:statistics(io),
@@ -1115,11 +1242,11 @@ get_incremental_stats(SchUsage) ->
 
 update_net_ticktime_from(Node) ->
     NetTickTime = rpc:call(Node, net_kernel, get_net_ticktime, []),
-    case net_kernel:set_net_ticktime(NetTickTime) of
-        change_initiated ->
-            ok;
-        {ongoing_change_to, NetTickTime} ->
-            ok;
-        unchanged ->
-            ok
-    end.
+    accept_net_ticktime_result(net_kernel:set_net_ticktime(NetTickTime), NetTickTime).
+
+accept_net_ticktime_result(change_initiated, _NetTickTime) ->
+    ok;
+accept_net_ticktime_result({ongoing_change_to, NetTickTime}, NetTickTime) ->
+    ok;
+accept_net_ticktime_result(unchanged, _NetTickTime) ->
+    ok.
