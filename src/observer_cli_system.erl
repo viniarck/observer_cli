@@ -143,14 +143,33 @@ render_cache_hit_section(#{allocator_info := #{cache_hit_info := CacheHitInfo}})
 collect_distribution_info() ->
     case ets:info(sys_dist, size) of
         undefined ->
-            [];
+            [empty_distribution_info(unknown, "dist disabled")];
         0 ->
-            [];
+            [empty_distribution_info(ok, "no connected nodes")];
         _ ->
             Limit = erlang:system_info(dist_buf_busy_limit),
-            {ok, DistNodesInfo} = net_kernel:nodes_info(),
-            [collect_distribution_node_info(DistNodeInfo, Limit) || DistNodeInfo <- DistNodesInfo]
+            case net_kernel:nodes_info() of
+                {ok, []} ->
+                    [empty_distribution_info(ok, "no connected nodes")];
+                {ok, DistNodesInfo} ->
+                    [
+                        collect_distribution_node_info(DistNodeInfo, Limit)
+                     || DistNodeInfo <- DistNodesInfo
+                    ]
+            end
     end.
+
+empty_distribution_info(Health, Detail) ->
+    {node(), #{
+        health => Health,
+        queue_size => undefined,
+        queue_limit => undefined,
+        address => Detail,
+        in => "-",
+        out => "-",
+        type => "-",
+        state => "-"
+    }}.
 
 collect_distribution_node_info({Node, Info}, Limit) ->
     {Node, #{
@@ -164,20 +183,28 @@ collect_distribution_node_info({Node, Info}, Limit) ->
     }}.
 
 render_dist_node_info([]) ->
-    [];
+    render_dist_node_info([empty_distribution_info(ok, "no connected nodes")]);
 render_dist_node_info(DistNodesInfo) ->
-    [NodeW, QueueW, PercentW, AddressW, InW, OutW, TypeW, StateW] = dist_node_widths(),
+    [HealthW, NodeW, QueueW, PercentW, AddressW, InW, OutW, TypeW, StateW] = dist_node_widths(),
     Title = ?render([
         ?UNDERLINE,
-        ?GRAY_BG,
-        ?W("Node", NodeW),
-        ?W("Dist Node Queue Size Bytes", QueueW),
-        ?W("Percent", PercentW),
-        ?W("Address", AddressW),
-        ?W("In", InW),
-        ?W("Out", OutW),
-        ?W("Type", TypeW),
-        ?W("State", StateW)
+        ?W2(?GRAY_BG, "Health", HealthW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Node", NodeW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Dist Queue", QueueW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Percent", PercentW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Address", AddressW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "In", InW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Out", OutW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Type", TypeW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "State", StateW)
     ]),
     View = lists:map(
         fun({Node, Info}) ->
@@ -188,25 +215,17 @@ render_dist_node_info(DistNodesInfo) ->
             Out = maps:get(out, Info),
             QueueSize = maps:get(queue_size, Info),
             Limit = maps:get(queue_limit, Info),
-            QueueSizeStr = observer_cli_lib:to_list(QueueSize),
-            QueueSizeLimitStr = QueueSizeStr ++ "/" ++ integer_to_list(Limit),
-            Percent =
-                case is_integer(QueueSize) of
-                    true ->
-                        Float = QueueSize / Limit,
-                        [erlang:float_to_list(Float * 100, [{decimals, 2}]), $%];
-                    false ->
-                        "unsupported"
-                end,
+            Health = maps:get(health, Info, dist_node_health(Info)),
             ?render([
-                ?W(Node, NodeW),
-                ?W(QueueSizeLimitStr, QueueW),
-                ?W(Percent, PercentW),
-                ?W(Address, AddressW),
-                ?W(In, InW),
-                ?W(Out, OutW),
-                ?W(Type, TypeW),
-                ?W(State, StateW)
+                ?W2(dist_health_color(Health), Health, HealthW),
+                ?W2(?RESET, Node, NodeW),
+                ?W2(?RESET, dist_queue_text(QueueSize, Limit), QueueW),
+                ?W2(?RESET, dist_percent_text(QueueSize, Limit), PercentW),
+                ?W2(?RESET, Address, AddressW),
+                ?W2(?RESET, In, InW),
+                ?W2(?RESET, Out, OutW),
+                ?W2(?RESET, Type, TypeW),
+                ?W2(?RESET, State, StateW)
             ])
         end,
         lists:sort(DistNodesInfo)
@@ -215,9 +234,38 @@ render_dist_node_info(DistNodesInfo) ->
 
 dist_node_widths() ->
     observer_cli_lib:weighted_widths(
-        [30, 20, 7, 19, 11, 11, 7, 10],
-        [4, 1, 0, 4, 0, 0, 0, 0]
+        [7, 28, 14, 7, 20, 10, 10, 7, 8],
+        [0, 4, 1, 0, 4, 0, 0, 0, 0]
     ).
+
+dist_node_health(#{state := State}) when State =/= up ->
+    down;
+dist_node_health(#{queue_size := QueueSize}) when not is_integer(QueueSize) ->
+    unknown;
+dist_node_health(#{queue_size := QueueSize, queue_limit := Limit}) when
+    is_integer(QueueSize), is_integer(Limit), Limit > 0, QueueSize / Limit >= 0.85
+->
+    warn;
+dist_node_health(_Info) ->
+    ok.
+
+dist_health_color(ok) -> ?GREEN;
+dist_health_color(warn) -> ?YELLOW;
+dist_health_color(down) -> ?RED;
+dist_health_color(unknown) -> ?YELLOW.
+
+dist_queue_text(undefined, undefined) ->
+    "-";
+dist_queue_text(QueueSize, Limit) ->
+    observer_cli_lib:to_list(QueueSize) ++ "/" ++ observer_cli_lib:to_list(Limit).
+
+dist_percent_text(undefined, undefined) ->
+    "-";
+dist_percent_text(QueueSize, Limit) when is_integer(QueueSize), is_integer(Limit), Limit > 0 ->
+    Float = QueueSize / Limit,
+    [erlang:float_to_list(Float * 100, [{decimals, 2}]), $%];
+dist_percent_text(_QueueSize, _Limit) ->
+    "unsupported".
 
 get_address(Info) ->
     #net_address{address = Address} = proplists:get_value(address, Info, #net_address{}),

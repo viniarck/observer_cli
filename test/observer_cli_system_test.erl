@@ -360,13 +360,70 @@ render_dist_node_info_unsupported_queue_test() ->
     ]),
     ?assert(string:find(lists:flatten(Lines), "unsupp") =/= nomatch).
 
+render_dist_node_info_empty_test() ->
+    Lines = observer_cli_system:render_dist_node_info([]),
+    Output = lists:flatten(Lines),
+    ?assert(string:find(Output, "Health") =/= nomatch),
+    ?assert(string:find(Output, "ok") =/= nomatch),
+    ?assert(string:find(Output, atom_to_list(node())) =/= nomatch),
+    ?assert(string:find(Output, "no connected nodes") =/= nomatch).
+
+render_dist_node_info_disabled_test() ->
+    Lines = observer_cli_system:render_dist_node_info([
+        {nonode@nohost, #{
+            health => unknown,
+            queue_size => undefined,
+            queue_limit => undefined,
+            address => "dist disabled",
+            in => "-",
+            out => "-",
+            type => "-",
+            state => "-"
+        }}
+    ]),
+    Output = lists:flatten(Lines),
+    ?assert(string:find(Output, "unknown") =/= nomatch),
+    ?assert(string:find(Output, "nonode@nohost") =/= nomatch),
+    ?assert(string:find(Output, "dist disabled") =/= nomatch).
+
+render_dist_node_info_warn_health_test() ->
+    Lines = observer_cli_system:render_dist_node_info([
+        {node(), #{
+            queue_size => 850,
+            queue_limit => 1000,
+            address => "unknown",
+            in => 0,
+            out => 0,
+            type => normal,
+            state => up
+        }}
+    ]),
+    Output = lists:flatten(Lines),
+    ?assert(string:find(Output, "warn") =/= nomatch),
+    ?assert(string:find(Output, "85.00%") =/= nomatch).
+
+render_dist_node_info_columns_align_test() ->
+    [Title, Row] = observer_cli_system:render_dist_node_info([
+        {node(), #{
+            health => ok,
+            queue_size => undefined,
+            queue_limit => undefined,
+            address => "no connected nodes",
+            in => "-",
+            out => "-",
+            type => "-",
+            state => "-"
+        }}
+    ]),
+    ?assertEqual(pipe_positions(Title), pipe_positions(Row)).
+
 render_dist_node_info_wide_layout_test() ->
     Created = ensure_sys_dist(),
     try
         Base = dist_node_widths(80),
         Wide = dist_node_widths(180),
-        ?assertEqual([3, 5, 6, 7, 8], unchanged_columns(Base, Wide, [3, 5, 6, 7, 8])),
-        ?assertEqual([1, 2, 4], wider_columns(Base, Wide, [1, 2, 4]))
+        ?assertEqual([1, 4, 6, 7, 8, 9], unchanged_columns(Base, Wide, [1, 4, 6, 7, 8, 9])),
+        ?assertEqual([2, 3, 5], wider_columns(Base, Wide, [2, 3, 5]))
     after
         maybe_delete_sys_dist(Created)
     end.
@@ -620,6 +677,10 @@ maybe_delete_sys_dist(true) ->
     ets:delete(sys_dist);
 maybe_delete_sys_dist(false) ->
     ok.
+
+pipe_positions(Line) ->
+    Plain = observer_cli_test_io:plain(Line),
+    [Pos || {Char, Pos} <- lists:zip(Plain, lists:seq(1, length(Plain))), Char =:= $|].
 
 unchanged_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
     [
