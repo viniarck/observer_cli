@@ -39,6 +39,52 @@ get_refresh_prompt_test() ->
     ?assert(lists:prefix("recon:proc_count", Count)),
     ?assert(lists:prefix("recon:proc_window", Window)).
 
+collect_top_n_test() ->
+    Count = observer_cli:collect_top_n(proc_count, memory, 1500, 1, true),
+    WindowFirst = observer_cli:collect_top_n(proc_window, memory, 1, 1, true),
+    WindowNext = observer_cli:collect_top_n(proc_window, memory, 1, 1, false),
+    ?assert(is_list(Count)),
+    ?assert(is_list(WindowFirst)),
+    ?assert(is_list(WindowNext)).
+
+collect_home_snapshot_test() ->
+    Home = #home{
+        interval = 1500,
+        func = proc_count,
+        type = memory,
+        cur_page = 1,
+        scheduler_usage = ?DISABLE
+    },
+    StableInfo = observer_cli:get_stable_system_info(),
+    LastStats = observer_cli:get_incremental_stats(?DISABLE),
+    {Snapshot, NewStats} =
+        observer_cli:collect_home_snapshot(
+            "printf 'header\\n 1 2\\n'", Home, StableInfo, LastStats, 15, true
+        ),
+    ?assertEqual(
+        lists:sort([
+            memory_summary,
+            process_rows,
+            refresh_prompt,
+            scheduler_usage,
+            system_summary,
+            top_processes
+        ]),
+        lists:sort(maps:keys(Snapshot))
+    ),
+    ?assertMatch([[{_, _} | _] | _], maps:get(system_summary, Snapshot)),
+    ?assertMatch([[{_, _} | _] | _], maps:get(memory_summary, Snapshot)),
+    ?assertEqual(undefined, maps:get(scheduler_usage, Snapshot)),
+    ?assertEqual(1, maps:get(process_rows, Snapshot)),
+    ?assert(is_list(maps:get(top_processes, Snapshot))),
+    ?assert(
+        lists:prefix(
+            "recon:proc_count(memory, 1)",
+            lists:flatten(maps:get(refresh_prompt, Snapshot))
+        )
+    ),
+    ?assertMatch({_, _, _, _, _}, NewStats).
+
 get_current_initial_call_test() ->
     Call = [
         {current_function, {lists, map, 2}},
@@ -50,25 +96,46 @@ get_current_initial_call_test() ->
 
 render_system_line_test() ->
     PsCmd = "printf 'header\\n 1 2\\n'",
-    {StableInfo, _} = observer_cli:get_stable_system_info(),
+    StableInfo = observer_cli:get_stable_system_info(),
     Line = observer_cli:render_system_line(PsCmd, StableInfo),
     ?assert(string:find(lists:flatten(Line), "System") =/= nomatch).
 
+render_system_line_unsupported_atom_status_test() ->
+    PsCmd = "printf 'header\\n 1 2\\n'",
+    StableInfo = observer_cli:get_stable_system_info(),
+    Line = observer_cli:render_system_line(PsCmd, StableInfo, {error, unsupported}),
+    ?assert(string:find(lists:flatten(Line), "Ets Limit") =/= nomatch).
+
 render_system_line_missing_output_test() ->
     PsCmd = "printf ''",
-    {StableInfo, _} = observer_cli:get_stable_system_info(),
+    StableInfo = observer_cli:get_stable_system_info(),
     Line = observer_cli:render_system_line(PsCmd, StableInfo),
     ?assert(string:find(lists:flatten(Line), "ps -o pcpu") =/= nomatch).
 
+accept_net_ticktime_result_test() ->
+    ?assertEqual(ok, observer_cli:accept_net_ticktime_result(change_initiated, 60)),
+    ?assertEqual(ok, observer_cli:accept_net_ticktime_result({ongoing_change_to, 60}, 60)),
+    ?assertEqual(
+        {error, connection, connection_failed},
+        observer_cli:accept_net_ticktime_result({ongoing_change_to, 30}, 60)
+    ),
+    ?assertEqual(ok, observer_cli:accept_net_ticktime_result(unchanged, 60)).
+
+update_net_ticktime_from_disconnected_node_test() ->
+    {ok, Host} = inet:gethostname(),
+    MissingNode = list_to_atom("observer_cli_missing_ticktime@" ++ Host),
+    ?assertEqual(
+        {error, connection, connection_failed},
+        observer_cli:update_net_ticktime_from(MissingNode)
+    ).
+
 render_memory_process_line_test() ->
     MemSum = {1, 2, 3, 4},
-    {_, PortParallelism} = observer_cli:get_stable_system_info(),
-    Line = observer_cli:render_memory_process_line(MemSum, PortParallelism, 1500),
+    Line = observer_cli:render_memory_process_line(MemSum, 1500),
     ?assert(string:find(lists:flatten(Line), "Total") =/= nomatch).
 
 render_memory_process_line_error_logger_test() ->
     MemSum = {1, 2, 3, 4},
-    {_, PortParallelism} = observer_cli:get_stable_system_info(),
     Prev = whereis(error_logger),
     TempPid =
         case Prev of
@@ -84,7 +151,7 @@ render_memory_process_line_error_logger_test() ->
                 Prev
         end,
     try
-        Line = observer_cli:render_memory_process_line(MemSum, PortParallelism, 1500),
+        Line = observer_cli:render_memory_process_line(MemSum, 1500),
         ?assert(string:find(lists:flatten(Line), "RunQueue") =/= nomatch)
     after
         case Prev of
@@ -102,17 +169,19 @@ render_home_summary_wide_layout_test() ->
         160,
         [],
         fun() ->
-            {StableInfo, PortParallelism} = observer_cli:get_stable_system_info(),
+            StableInfo = observer_cli:get_stable_system_info(),
             SystemLines = observer_cli:render_system_line(
                 "printf 'header\n 1 2\n'", StableInfo
             ),
-            MemLines = observer_cli:render_memory_process_line(
-                {1, 2, 3, 4}, PortParallelism, 1500
-            ),
+            MemLines = observer_cli:render_memory_process_line({1, 2, 3, 4}, 1500),
             [SystemTitle | _] = SystemLines,
             [MemTitle | _] = MemLines,
             ?assertEqual(
                 observer_cli_lib:layout_width(), hd(home_summary_line_lengths(SystemTitle))
+            ),
+            ?assertEqual(
+                nomatch,
+                binary:match(unicode:characters_to_binary(MemTitle), <<"\e[0m |">>)
             ),
             ?assertEqual([15, 26, 30, 25, 25, 31], home_summary_widths(SystemTitle)),
             ?assertEqual([15, 26, 30, 25, 25, 31], home_summary_widths(MemTitle)),
@@ -145,6 +214,7 @@ render_home_summary_wide_layout_test() ->
 
 render_scheduler_usage_test() ->
     ?assertEqual({0, []}, observer_cli:render_scheduler_usage(undefined)),
+    ?assertEqual({0, []}, observer_cli:render_scheduler_usage([])),
     {2, _} = observer_cli:render_scheduler_usage([{1, 0.1}, {2, 0.2}, {3, 0.3}, {4, 0.4}]),
     {3, _} = observer_cli:render_scheduler_usage([{1, 0.1}, {2, 0.2}, {3, 0.3}, {4, 0.4}, {5, 0.5}]),
     {2, _} = observer_cli:render_scheduler_usage(
@@ -161,6 +231,8 @@ render_scheduler_usage_test() ->
     ).
 
 render_scheduler_usage_wide_layout_test() ->
+    FullSchedulers = lists:map(fun(N) -> {N, 1.0} end, lists:seq(1, 8)),
+    ?assert(scheduler_bar_count(160, FullSchedulers) > scheduler_bar_count(139, FullSchedulers)),
     observer_cli_test_io:with_geometry(
         24,
         160,
@@ -186,6 +258,17 @@ render_scheduler_usage_wide_layout_test() ->
                     Samples
                 )
             )
+        end
+    ).
+
+scheduler_bar_count(Columns, SchedulerUsage) ->
+    observer_cli_test_io:with_geometry(
+        24,
+        Columns,
+        [],
+        fun() ->
+            {_Rows, [Line | _]} = observer_cli:render_scheduler_usage(SchedulerUsage),
+            erlang:length([Char || Char <- observer_cli_test_io:plain(Line), Char =:= $|])
         end
     ).
 
@@ -218,10 +301,61 @@ render_top_n_view_test() ->
     ?assertEqual(3, length(Rows3)),
     ?assertEqual(2, length(PidList4)),
     ?assertEqual(3, length(Rows4)),
+    ExpectedHeap = observer_cli_lib:to_byte(1000 * erlang:system_info(wordsize)),
+    ?assertNotEqual(nomatch, string:find(observer_cli_test_io:plain(Rows4), ExpectedHeap)),
     ?assertEqual(2, length(PidList5)),
     ?assertEqual(3, length(Rows5)),
     erlang:exit(Pid2, kill),
     {PidList1, Rows1, Rows2, Rows3, Rows4, Rows5}.
+
+render_top_n_view_type_columns_test() ->
+    Pid = self(),
+    Call = [
+        {registered_name, undefined},
+        {current_function, {lists, map, 2}},
+        {initial_call, {erlang, apply, 3}}
+    ],
+    Items = [{Pid, 1000, Call}],
+    LayoutWidth = observer_cli_lib:layout_base_width(),
+    Cases = [
+        {memory, LayoutWidth, ["Memory", "Reductions", "MsgQueue"]},
+        {binary_memory, LayoutWidth, ["BinMemory", "Reductions", "MsgQueue"]},
+        {reductions, LayoutWidth + 1, ["Reductions", "Memory", "MsgQueue"]},
+        {total_heap_size, LayoutWidth, ["TotalHeapSize", "Reductions", "MsgQueue"]},
+        {message_queue_len, LayoutWidth, ["MsgQueue", "Memory", "Reductions"]}
+    ],
+    lists:foreach(
+        fun({Type, TitleWidth, Fragments}) ->
+            {_, [Title, Row]} = observer_cli:render_top_n_view(
+                Type, Items, 1, [{1, 1}], 1, LayoutWidth
+            ),
+            observer_cli_test_io:assert_stable_fragments(
+                [Title],
+                ["No | Pid", "Name|>Label|>Initial Call", "Current Function" | Fragments]
+            ),
+            RowBin = unicode:characters_to_binary(Row),
+            ?assertNotEqual(nomatch, binary:match(RowBin, ?ANSI_INVERSE)),
+            ?assertEqual(nomatch, binary:match(RowBin, ?ANSI_GREEN_BG)),
+            ?assertEqual(TitleWidth, observer_cli_lib:visible_length(Title)),
+            ?assertEqual(LayoutWidth, observer_cli_lib:visible_length(Row))
+        end,
+        Cases
+    ).
+
+select_home_process_test() ->
+    StorePid = observer_cli_store:start(),
+    Pid1 = spawn(fun wait_forever/0),
+    Pid2 = spawn(fun wait_forever/0),
+    try
+        observer_cli_store:update(StorePid, 2, [{2, Pid1}, {3, Pid2}]),
+        ExactOpts = #view_opts{home = #home{cur_page = 1, pages = [{1, 2}]}},
+        FallbackOpts = #view_opts{home = #home{cur_page = 1, pages = [{1, 1}]}},
+        ?assertEqual({ok, Pid1}, observer_cli:select_home_process(StorePid, ExactOpts, false)),
+        ?assertEqual(error, observer_cli:select_home_process(StorePid, FallbackOpts, false)),
+        ?assertEqual({ok, Pid2}, observer_cli:select_home_process(StorePid, FallbackOpts, true))
+    after
+        observer_cli_lib:exit_processes([StorePid, Pid1, Pid2])
+    end.
 
 render_top_n_view_wide_layout_test() ->
     Pid = self(),
@@ -332,6 +466,25 @@ node_stats_test() ->
 check_auto_row_test() ->
     ?assert(is_boolean(observer_cli:check_auto_row())).
 
+private_home_layout_contract_test() ->
+    ?assertEqual([], observer_cli:join_home_summary_rows([])),
+    ?assertNotEqual(
+        [],
+        observer_cli:join_home_summary_rows([
+            {normal, [{"one", 10}]}
+        ])
+    ),
+    ?assertNotEqual(
+        [],
+        observer_cli:join_home_summary_rows([
+            {normal, [{"one", 10}]}, {normal, [{"two", 10}]}
+        ])
+    ),
+    ?assertEqual(0, observer_cli:scheduler_usage_rows(undefined)),
+    ?assertEqual(2, observer_cli:scheduler_usage_rows([a, b, c])),
+    ?assertEqual(3, observer_cli:scheduler_usage_rows(lists:seq(1, 12))),
+    ?assertEqual(11, observer_cli:scheduler_usage_rows(lists:seq(1, 101))).
+
 home_summary_widths(IoData) ->
     Header =
         case non_empty_lines(IoData) of
@@ -360,5 +513,11 @@ plain(IoData) ->
             [global, {return, binary}]
         )
     ).
+
+wait_forever() ->
+    receive
+    after infinity ->
+        ok
+    end.
 
 -endif.

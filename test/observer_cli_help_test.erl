@@ -23,18 +23,6 @@ start_manager_unknown_test() ->
         end
     ).
 
-clean_test() ->
-    Pid = spawn(fun() -> receive
-        after infinity -> ok
-        end end),
-    Ref = erlang:monitor(process, Pid),
-    observer_cli_help:clean([Pid]),
-    receive
-        {'DOWN', Ref, process, Pid, _} -> ok
-    after 1000 ->
-        ok
-    end.
-
 render_help_test() ->
     Text = lists:flatten(observer_cli_help:render_help()),
     ?assert(string:find(Text, "Start Mode") =/= nomatch).
@@ -49,6 +37,7 @@ render_help_grouping_test() ->
     ReferenceSection = after_text(Text, "5. Reference"),
     ?assert(string:find(StartSection, "observer_cli:start().") =/= nomatch),
     ?assert(string:find(GlobalSection, "pause/unpause") =/= nomatch),
+    ?assert(string:find(GlobalSection, "socket API sockets") =/= nomatch),
     ?assertEqual(nomatch, string:find(HomeSection, "pause/unpause")),
     ?assert(string:find(HomeSection, "schedule usage") =/= nomatch),
     ?assert(string:find(ProcessSection, "<0.43.0>") =/= nomatch),

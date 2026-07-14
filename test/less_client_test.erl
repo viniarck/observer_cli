@@ -97,11 +97,21 @@ main_nav_action_test() ->
 
 main_nav_action_non_quit_test() ->
     observer_cli_test_io:with_input(
-        ["n\n"],
+        ["H\n"],
         fun() ->
-            Nav = #{"n\n" => home},
+            Nav = #{"H\n" => home},
             State = less_client:init({"a\nb\n", "Header\n", Nav, "Footer\n"}),
             ?assertEqual(home, less_client:main(State))
+        end
+    ).
+
+main_nav_action_back_test() ->
+    observer_cli_test_io:with_input(
+        ["B\n"],
+        fun() ->
+            Nav = #{"B\n" => back},
+            State = less_client:init({"a\nb\n", "Header\n", Nav, "Footer\n"}),
+            ?assertEqual(back, less_client:main(State))
         end
     ).
 
@@ -144,13 +154,13 @@ line_helpers_test() ->
     ?assertEqual(1, less_client:footer_lines(undefined)),
     ?assertEqual(1, less_client:footer_lines("F")).
 
-render_last_line_test() ->
-    Line = less_client:render_last_line(#{}),
+render_footer_test() ->
+    Line = less_client:render_footer(#{}),
     ?assert(is_binary(Line)),
     ?assertMatch({_, _}, binary:match(Line, <<"q(quit)">>)).
 
-render_last_line_with_back_test() ->
-    Line = less_client:render_last_line(#{"B\n" => prev}),
+render_footer_with_back_test() ->
+    Line = less_client:render_footer(#{"B\n" => prev}),
     ?assertMatch({_, _}, binary:match(Line, <<"k(previous page)">>)).
 
 -endif.

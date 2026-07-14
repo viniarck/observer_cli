@@ -6,7 +6,6 @@
 
 %% API
 -export([start/1]).
--export([clean/1]).
 
 -ifdef(TEST).
 -export([render_help/0, render_doc/1, render_worker/1]).
@@ -19,16 +18,13 @@
 start(#view_opts{help = #help{interval = Interval}} = ViewOpts) ->
     ChildPid = spawn_link(fun() ->
         Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
-        Menu = observer_cli_lib:render_menu(doc, Text),
+        Menu = observer_cli_lib:render_top_menu(doc, Text),
         Help = render_help(),
-        LastLine = observer_cli_lib:render_last_line("q(quit)"),
+        LastLine = observer_cli_lib:render_footer("q(quit)"),
         ?output([?CLEAR, Menu, Help, ?UNDERLINE, ?GRAY_BG, LastLine, ?RESET_BG, ?RESET]),
         render_worker(Interval)
     end),
     manager(ChildPid, ViewOpts).
-
--spec clean(list()) -> ok.
-clean(Pids) -> observer_cli_lib:exit_processes(Pids).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Private
@@ -42,7 +38,7 @@ manager(ChildPid, ViewOpts) ->
 render_worker(Interval) ->
     ?output(?CURSOR_TOP),
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
-    Menu = observer_cli_lib:render_menu(doc, Text),
+    Menu = observer_cli_lib:render_top_menu(doc, Text),
     ?output([?CURSOR_TOP, Menu]),
     render_doc(Text),
     erlang:send_after(Interval, self(), redraw),
@@ -54,9 +50,9 @@ render_worker(Interval) ->
     end.
 
 render_doc(Text) ->
-    MenuQ = observer_cli_lib:render_menu(doc, Text),
+    MenuQ = observer_cli_lib:render_top_menu(doc, Text),
     HelpQ = render_help(),
-    LastLine = observer_cli_lib:render_last_line("q(quit)"),
+    LastLine = observer_cli_lib:render_footer("q(quit)"),
     ?output([?CURSOR_TOP, MenuQ, HelpQ, ?UNDERLINE, ?GRAY_BG, LastLine, ?RESET_BG, ?RESET]).
 
 render_help() ->
@@ -72,6 +68,8 @@ render_help() ->
         shortcut("PageUp", "pu or B(back)."),
         shortcut("3000", "set interval time to 3000ms, the integer must >= 1500."),
         shortcut("p", "pause/unpause the view."),
+        shortcut("O", "open all ports view."),
+        shortcut("K", "open socket API sockets view."),
 
         section("3. HOME(H) Commands"),
         shortcut("`", "enable/disable schedule usage."),

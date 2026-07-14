@@ -5,10 +5,19 @@
 
 %% API
 -export([start/1]).
--export([clean/1]).
 
 -ifdef(TEST).
--export([app_status/1, find_group_leader/1, render_app_info/3, update_app_stats/6]).
+-export([
+    app_status/1,
+    collect_app_info/0,
+    collect_app_info/4,
+    collect_app_render_info/3,
+    find_group_leader/1,
+    app_render_info/4,
+    render_app_info/3,
+    update_app_stats/6,
+    leader_info/1
+]).
 -endif.
 
 %% API
@@ -17,7 +26,7 @@
 ).
 
 %% erlang:processes_iterator/0 is not exported before OTP 27
--dialyzer([{nowarn_function, [app_info/0, app_info_iter/4]}]).
+-dialyzer([{nowarn_function, [collect_app_info/0, app_info_iter/4]}]).
 -ignore_xref({erlang, processes_iterator, 0}).
 -ignore_xref({erlang, processes_next, 1}).
 
@@ -31,9 +40,6 @@ start(#view_opts{app = App, auto_row = AutoRow} = ViewOpts) ->
     end),
     manager(Pid, ViewOpts).
 
--spec clean(list()) -> ok.
-clean(Pids) -> observer_cli_lib:exit_processes(Pids).
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -44,41 +50,41 @@ manager(Pid, Opts = #view_opts{app = App = #app{cur_page = CurPage}}) ->
             erlang:send(Pid, quit),
             quit;
         {func, proc_count, message_queue_len} ->
-            clean([Pid]),
-            start(Opts#view_opts{app = App#app{type = {message_queue_len, 4}}});
+            restart(Pid, Opts#view_opts{app = App#app{type = {message_queue_len, 4}}});
         {func, proc_count, reductions} ->
-            clean([Pid]),
-            start(Opts#view_opts{app = App#app{type = {reductions, 3}}});
+            restart(Pid, Opts#view_opts{app = App#app{type = {reductions, 3}}});
         {func, proc_count, memory} ->
-            clean([Pid]),
-            start(Opts#view_opts{app = App#app{type = {memory, 2}}});
+            restart(Pid, Opts#view_opts{app = App#app{type = {memory, 2}}});
         pause_or_resume ->
-            clean([Pid]),
-            start(Opts#view_opts{app = App#app{type = {proc_count, 1}}});
+            restart(Pid, Opts#view_opts{app = App#app{type = {proc_count, 1}}});
         {new_interval, NewInterval} ->
-            clean([Pid]),
-            start(Opts#view_opts{app = App#app{interval = NewInterval}});
+            restart(Pid, Opts#view_opts{app = App#app{interval = NewInterval}});
         page_down_top_n ->
-            NewPage = max(CurPage + 1, 1),
-            clean([Pid]),
-            start(Opts#view_opts{app = App#app{cur_page = NewPage}});
+            restart_page(Pid, Opts, CurPage, 1);
         page_up_top_n ->
-            NewPage = max(CurPage - 1, 1),
-            clean([Pid]),
-            start(Opts#view_opts{app = App#app{cur_page = NewPage}});
+            restart_page(Pid, Opts, CurPage, -1);
         _ ->
             manager(Pid, Opts)
     end.
+
+restart_page(Pid, Opts = #view_opts{app = App}, CurPage, Delta) ->
+    NewPage = observer_cli_lib:next_page(CurPage, Delta),
+    restart(Pid, Opts#view_opts{app = App#app{cur_page = NewPage}}).
+
+restart(Pid, Opts) ->
+    observer_cli_lib:exit_processes([Pid]),
+    start(Opts).
 
 render_worker(App, AutoRow) ->
     #app{type = Type, interval = Interval, cur_page = CurPage} = App,
     TerminalRow = observer_cli_lib:get_terminal_rows(AutoRow),
     Rows = erlang:max(TerminalRow - 5, 0),
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
-    Menu = observer_cli_lib:render_menu(app, Text),
-    Info = render_app_info(Rows, CurPage, Type),
+    Menu = observer_cli_lib:render_top_menu(app, Text),
+    AppInfo = collect_app_render_info(Rows, CurPage, Type),
+    Info = render_app_info(AppInfo, Type),
     LastText = io_lib:format(?LAST_LINE, [Interval, CurPage]),
-    LastLine = observer_cli_lib:render_last_line(LastText),
+    LastLine = observer_cli_lib:render_footer(LastText),
     ?output([?CURSOR_TOP, Menu, Info, LastLine]),
     erlang:send_after(Interval, self(), redraw),
     receive
@@ -86,14 +92,19 @@ render_worker(App, AutoRow) ->
         redraw -> render_worker(App, AutoRow)
     end.
 
-render_app_info(Row, CurPage, {Type, N}) ->
-    List = [
+collect_app_render_info(Row, CurPage, Type) ->
+    app_render_info(collect_app_info(), Row, CurPage, Type).
+
+app_render_info(AppInfo, Row, CurPage, {_Type, N}) ->
+    Rows = [
         begin
             {0, {element(N, I), S}, [App, C, M, R, Q, S, V]}
         end
-     || {App, I = {C, M, R, Q, S, V}} <- maps:to_list(app_info())
+     || {App, I = {C, M, R, Q, S, V}} <- maps:to_list(AppInfo)
     ],
-    {StartPos, SortList} = observer_cli_lib:sublist(List, Row, CurPage),
+    observer_cli_lib:sublist(Rows, Row, CurPage).
+
+render_app_info({StartPos, SortList}, {Type, _N}) ->
     InitColor = [
         {memory, ?GRAY_BG},
         {proc_count, ?GRAY_BG},
@@ -158,6 +169,11 @@ render_app_info(Row, CurPage, {Type, N}) ->
     ),
     [Title | lists:reverse(View)].
 
+-ifdef(TEST).
+render_app_info(Row, CurPage, Type) ->
+    render_app_info(collect_app_render_info(Row, CurPage, Type), Type).
+-endif.
+
 app_title_widths() ->
     observer_cli_lib:weighted_widths(
         [3, 31, 20, 20, 17, 10, 12, 16],
@@ -170,7 +186,7 @@ app_row_widths() ->
         [0, 4, 0, 0, 1, 0, 0, 4]
     ).
 
-app_info() ->
+collect_app_info() ->
     Info = application:info(),
     AllApps = app_status(Info),
     Leaders = leader_info(Info),
@@ -180,6 +196,11 @@ app_info() ->
         false ->
             app_info(AllApps, Leaders, erlang:processes(), self())
     end.
+
+-ifdef(TEST).
+collect_app_info(AllApps, Leaders, Processes, Self) ->
+    app_info(AllApps, Leaders, Processes, Self).
+-endif.
 
 app_info_iter(AllApps, Leaders, Iter, Self) ->
     case erlang:processes_next(Iter) of
@@ -331,6 +352,8 @@ get_version(App, Maps) ->
         _ -> "unknown"
     end.
 
+find_group_leader(Pid) when node(Pid) =/= node() ->
+    no_group;
 find_group_leader(Pid) ->
     case erlang:process_info(Pid, group_leader) of
         undefined -> no_group;

@@ -1,5 +1,3 @@
----
-
 # observer_cli
 
 [![Build Status](https://github.com/zhongwencool/observer_cli/workflows/ci/badge.svg)](https://github.com/zhongwencool/observer_cli/actions)
@@ -10,248 +8,191 @@
 [![Hex.pm Downloads](https://img.shields.io/hexpm/dt/observer_cli.svg)](https://hex.pm/packages/observer_cli)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-lightgreen.svg)](https://hexdocs.pm/observer_cli/)
 
-Observer CLI is a library to be dropped into any BEAM nodes, to be used to help DevOps people diagnose problems in production nodes. Based on [recon](https://github.com/ferd/recon).
+**Production-ready BEAM diagnostics for operators, automation, and AI agents.**
 
-<img src="https://github.com/zhongwencool/observer_cli/raw/main/docs/images/home.png" width="100%" alt="Home"> </img>
+`observer_cli` inspects live Erlang and Elixir systems through two explicit
+interfaces. The command CLI is the recommended starting point for bounded,
+repeatable diagnostics with stable text, Erlang-term, or JSON output. The TUI
+provides a live terminal workspace for interactive exploration.
 
-- Provide a high-performance tool usable both in development and production settings.
-- Focus on important and detailed information about real-time running system.
-- Keep minimal consumption.
+Both interfaces use Erlang distribution. Connect only to trusted nodes over a
+trusted network: a distribution cookie is not a read-only credential.
 
----
+![Observer CLI Home page showing live VM health, memory and IO statistics, and
+process rankings](https://raw.githubusercontent.com/zhongwencool/observer_cli/8ec77bc92ea3238f17585f948977d04a6d6ec3fb/docs/assets/tui-home.png)
 
 ## Installation
 
-<!-- tabs-open -->
-### Erlang
-
-```erlang
-%% rebar.config
-{deps, [observer_cli]}
-%% erlang.mk
-dep_observer_cli = hex 1.8.8
-```
-
-### Elixir
-
-```elixir
-# mix.exs
-   def deps do
-     [{:observer_cli, "~> 1.8"}]
-   end
-```
-<!-- tabs-close -->
-
-## How-To
-
-### Try in local shell.
+Install `observer_cli` in the target release so command diagnostics can run
+there. Version 2.0 controllers require the matching `2.0.0` target bundle.
+Observer CLI 2.0 supports Erlang/OTP 26–29. JSON output requires OTP 27 or
+newer on the controller; text and Erlang-term output work across the supported
+range.
 
 <!-- tabs-open -->
 ### Erlang
 
+Add the dependency to `rebar.config`:
+
 ```erlang
-%% rebar3 project
-rebar3 shell
-1> observer_cli:start().
+{deps, [
+    {observer_cli, "2.0.0"}
+]}.
 ```
-Tip: CI uses `rebar3 as ci compile` (warnings are treated as errors).
+
+Fetch and compile it:
+
+```sh
+rebar3 compile
+```
+
 ### Elixir
+
+Add the dependency to `mix.exs`:
+
 ```elixir
-%% mix project
-iex -S mix
-iex(1)> :observer_cli.start
+defp deps do
+  [
+    {:observer_cli, "2.0.0"}
+  ]
+end
+```
+
+Fetch and compile it:
+
+```sh
+mix deps.get
+mix compile
 ```
 <!-- tabs-close -->
 
-### Monitor remote node
+## Get started
+
+Release downloads are prebuilt escripts, not standalone native binaries. They
+require Erlang/OTP and `escript` on the controller. The command CLI still
+requires the matching `observer_cli` version in the target release; TUI
+auto-load also requires the controller and target to use the same OTP major.
+
+### Download a GitHub Release (recommended)
+
+On macOS or Linux, the versioned installer selects the escript for the local
+OTP major, verifies its release checksum, and installs it for the current user:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zhongwencool/observer_cli/v2.0.0/install.sh | sh
+```
+
+Add `$HOME/.local/bin` to `PATH` if the installer asks you to.
+
+### Build from source
+
+Build the same version from its release tag instead:
+
+```sh
+VERSION=2.0.0
+git clone --branch "v${VERSION}" --depth 1 \
+  https://github.com/zhongwencool/observer_cli.git
+cd observer_cli
+```
 
 <!-- tabs-open -->
-### Erlang
-```erlang
-%% rebar3 project
-rebar3 shell --name 'observer_cli@127.0.0.1'
-1> observer_cli:start('target@host', 'magic_cookie').
+#### Rebar3
+
+```sh
+rebar3 escriptize
+BIN=./_build/default/bin/observer_cli
 ```
-### Elixir
-```elixir
-%% mix project
-iex --name "observer_cli@127.0.0.1" -S mix
-iex(1)> :observer_cli.start(:'target@host', :'magic_cookie')
+
+#### Mix
+
+The CI-tested toolchain is Erlang/OTP 29 with Elixir 1.20:
+
+```sh
+mix deps.get
+mix escript.build
+BIN=./observer_cli
 ```
 <!-- tabs-close -->
 
-> #### exclamation {: .info}
-> **ensure the observer_cli application has been loaded on the target node.**
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "$BIN" "$HOME/.local/bin/observer_cli"
+export PATH="$HOME/.local/bin:$PATH"
+observer_cli --version
+```
 
-> #### tip {: .tip}
-> Pass `{interval, 3000}` (Erlang) or `interval: 3000` (Elixir) to sample every 3 seconds. The minimum refresh interval is 1000 ms.
+Save a target without storing its cookie value:
 
-### Escriptize
+```sh
+export OBSERVER_CLI_COOKIE='replace-me'
 
-1. cd path/to/observer_cli/
-2. `rebar3 escriptize` to generate an escript executable containing the project's and its dependencies' BEAM files.
-   Place script(`_build/default/bin/observer_cli`) anywhere in your path and use `observer_cli` command.
-3. `observer_cli TARGETNODE [TARGETCOOKIE REFRESHMS]` to monitor remote node.
+observer_cli connect \
+  --node app@host \
+  --cookie-env OBSERVER_CLI_COOKIE
+observer_cli status
+observer_cli diagnose
+observer_cli disconnect
+```
 
+`connect` stores a target selector, not a persistent connection. Every remote
+command starts a temporary hidden controller, performs bounded work, validates
+the response, and stops the controller before returning.
 
-## Features
+## What you can do
 
-### Home Panel
+- Diagnose capacity pressure with calibrated findings and explicit probe
+  coverage.
+- Inspect memory, allocators, schedulers, distribution, and network activity.
+- Rank processes, applications, ETS tables, Mnesia tables, ports, and sockets.
+- Inspect one process, Erlang port, supervision tree, or bounded OTP state.
+- Read a bounded tail from one trusted plain `logger_std_h` configured file
+  without flushing Logger or accepting an arbitrary path.
+- Capture one exact, bounded function trace with explicit node-global consent.
+- Feed automation and agents a versioned `observer_cli.cli/v1` envelope with
+  stable exit statuses.
+- Explore the same node interactively through detailed TUI pages and plugins.
 
-![Home](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/home_panel.jpg)
+The normative machine-readable response contract is published as
+[`priv/schema/observer_cli.cli.v1.schema.json`](https://raw.githubusercontent.com/zhongwencool/observer_cli/v2.0.0/priv/schema/observer_cli.cli.v1.schema.json).
 
-The Home panel provides a comprehensive overview of your Erlang node:
+## Choose CLI or TUI
 
-[`erlang:system_info/1`](http://erlang.org/doc/man/erlang.html#system_info-1) returns specified information about the current system in the items below. When the ratio is greater than 85%, it becomes red.
+| Interface | Choose it for | Start it with |
+| --- | --- | --- |
+| **CLI — recommended** | Production runbooks, automation, incident capture, and AI-agent workflows | `observer_cli diagnose` |
+| TUI | Live exploration, ranking changes, and detail drill-down | `observer_cli tui app@host` |
 
-| Metric             | Source/Limit              |
-|--------------------|---------------------------|
-| Proc Count         | process_count/process_limit |
-| Port Count         | port_count/port_limit   |
-| Atom Count         | atom_count/atom_limit     |
+The CLI requires `observer_cli` 2.0.0 in the target release and does not inject
+missing diagnostic code. The TUI can load its matching interactive bundle on a
+trusted target before starting. The old bare
+`observer_cli NODE [COOKIE REFRESH_MS]` form is not supported; use the explicit
+`tui` command.
 
-* **process_limit**: `erl +P Number` sets the maximum number of simultaneously existing processes for this system if a Number is passed as value. Valid range for Number is [1024-134217727]. The default value is 262144.
-* **port_limit**: `erl +Q Number` sets the maximum number of simultaneously existing ports for this system if a Number is passed as value. Valid range for Number is [1024-134217727]. The default value used is normally 65536. However, if the runtime system is able to determine maximum amount of file descriptors that it is allowed to open and this value is larger than 65536, the chosen value will be increased to a value larger than or equal to the maximum amount of file descriptors that can be opened.
-* **atom_limit**: `erl +t size` sets the maximum number of atoms the virtual machine can handle. Defaults to 1,048,576.
+TUI auto-load sends controller-compiled BEAM bytecode to the target without
+recompiling it. Build the controller on the same OTP major as the target when
+auto-load is needed; cross-major bytecode loading is outside the supported
+compatibility contract.
 
-[`ps`](https://man7.org/linux/man-pages/man1/ps.1.html) reports a snapshot of the BEAM OS process and feeds the system panel. Observer CLI samples four columns:
+`observer_cli logs` returns sensitive, untrusted retained text. It reads only a
+selected handler's configured path, not the handler's private file descriptor
+or rotation archives, and deliberately rejects redaction flags.
 
-| Command/Flag | Description |
-|--------------|-------------|
-| `ps -o pcpu` | CPU utilization of the BEAM OS process expressed as percentage of a single core. Calculated from cumulative scheduler time / wall clock time, so it may exceed what top reports on multi-core systems. |
-| `ps -o pmem` | Percentage of physical memory used by the BEAM OS process (resident set size / total RAM). |
-| `ps -o rss`  | Resident set size in kilobytes, useful for spotting long-lived memory growth. |
-| `ps -o vsz`  | Virtual memory size in kilobytes, highlighting total address space reservations (code, heap, and mapped binaries). |
+## Upgrading from 1.x
 
-[`erlang:memory/0`](http://erlang.org/doc/man/erlang.html#memory-0) Returns a list with information about memory dynamically allocated by the Erlang emulator.
+Version 2.0 changes the TUI plugin callbacks and replaces positional plugin
+sorting. Follow the [1.x plugin migration table](https://hexdocs.pm/observer_cli/tui-plugins.html#migrate-a-1-x-plugin-to-2-0).
 
-[`erlang:statistics/1`](http://erlang.org/doc/man/erlang.html#statistics-1)
+## Next steps
 
-| Statistic                     | Description                                                                                                                                                                                |
-|-------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| active task                   | returns the same as `statistics(active_tasks_all)` with the exception that no information about the dirty IO run queue and its associated schedulers is part of the result. That is, only tasks that are expected to be CPU bound are part of the result. |
-| context switches              | returns the total number of context switches since the system started.                                                                                                                      |
-| reductions(total/sinceLastCall) | total reductions/reductions since last call.                                                                                                                                               |
-| io                            | The total number of bytes received/send through ports and the receive/send bytes through ports of growth during the refresh interval.                                                       |
-| garbage_collection            | `erlang:statistics(garbage_collection)` which returns the total value and the `{Number_of_GCs, Words_Reclaimed}` of growth during the refresh interval.                                       |
-| run_queue                     | The total length of all normal run-queues. That is, the number of processes and ports that are ready to run on all available normal run-queues. Dirty run queues are not part of the result. |
+- [CLI](https://hexdocs.pm/observer_cli/cli.md): install both sides, connect, diagnose, automate,
+  interpret output, and troubleshoot a complete first workflow.
+- [TUI reference](https://hexdocs.pm/observer_cli/tui.md): start the interface and look up every
+  page, field, source, and shortcut.
+- [TUI plugins](https://hexdocs.pm/observer_cli/tui-plugins.md): add plugin sheets, row
+  drill-down, and process formatters.
+- [Core concepts](https://hexdocs.pm/observer_cli/core-concepts.md): understand execution,
+  compatibility, diagnostic evidence, and safety boundaries.
 
-Increments are values that are mostly useful when compared to a previous
-one to have an idea what they're doing, because otherwise they'd never
-stop increasing: bytes in and out of the node, number of garbage collector
-runs, words of memory that were garbage collected, and the global reductions
-count for the node.
-
-Scheduler utilization by [`erlang:statistics(scheduler_wall_time)`](http://erlang.org/doc/man/erlang.html#statistics_scheduler_wall_time):
-
-* Total scheduler utilization will equal 1.0 when all schedulers have been active all the time between the two refresh intervals.
-* The result being that there is a decent chunk of CPU usage that would be mostly free for scheduling actual Erlang work (assuming the schedulers are busy waiting more than trying to select tasks to run), but is being reported as busy by the OS.
-* The scheduler usage may show a higher rate (1.0) than what the OS will report. Schedulers waiting for OS resources are considered utilized as they cannot handle more work. If the OS itself is holding up on non-CPU tasks it is still possible for Erlang’s schedulers not to be able to do more work and report a full ratio.
-
-
-### Process
-
-When looking for high memory usage, for example it's interesting to be able to list all of a node's processes and find the top N consumers. Enter `m` then press `Enter` will use the `recon:proc_count(memory, N)` function, and you will get output like the following. On OTP 27+ nodes, process rows also display any label set through [`proc_lib:set_label/1`](https://www.erlang.org/doc/apps/stdlib/proc_lib.html#set_label/1), which helps correlate supervised jobs with their metrics.
-
-![Top](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/process.jpg)
-
-[`recon:proc_count/2`](http://ferd.github.io/recon/recon.html#proc_count-2) and [`recon:proc_window/3`](http://ferd.github.io/recon/recon.html#proc_window-3) are to be used when you require information about processes in a larger sense: biggest consumers of given process `memory`, `reductions`, `binary`, `total_heap_size`, `message_queue_len`, either absolutely or over a sliding time window, respectively.
-
-For more detail about sliding time windows, see [`recon:proc_window/3`](http://ferd.github.io/recon/recon.html#proc_window-3)
-
-When an abnormal process is found, enter the suspected process sequence(Integer) then press `Enter` will use [`erlang:process_info/2`](http://erlang.org/doc/man/erlang.html#process_info-2) to show a lot of information available (which is safe to use in production) about processes.
-
-![Process](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/process_info.jpg)
-
-* **registered_name**: if the process has a name (as registered with `erlang:register/2`), it is given here.
-* **trap_exit**: set `trap_exit` to true, exit signals arriving to a process are converted to `{EXIT,From,Reason}` messages, which can be received as ordinary messages. If `trap_exit` is set to false, the process exits if it receives an exit signal other than normal and the exit signal is propagated to its linked processes. Application processes are normally not to trap exits.
-* **group_leader**: the group leader of a process defines where IO (files, output of `io:format/1-3`) goes.
-* **initial_call**: is the initial function call with which the process was spawned.
-* **links**: is a list of process identifiers and port identifiers, with processes or ports to which the process has a link.
-* **monitored_by**: A list of process identifiers monitoring the process (with `monitor/2`).
-* **monitors**: A list of monitors (started by `monitor/2`) that are active for the process. For a local process monitor or a remote process monitor by a process identifier.
-* **status**: the nature of the process as seen by the scheduler. The possible values are:
-    * `exiting` the process is done, but not fully cleared yet;
-    * `waiting` the process is waiting in a `receive ... end`;
-    * `running` self-descriptive;
-    * `runnable` ready to run, but not scheduled yet because another process is running;
-    * `garbage_collecting` self-descriptive;
-    * `suspended` whenever it is suspended by a BIF, or as a back-pressure mechanism because a socket or port buffer is full. The process only becomes runnable again once the port is no longer busy
-* **reductions**: The VM does scheduling based on reductions, an arbitrary unit of work that allows rather portable implementations of scheduling (time-based scheduling is usually hard to make work efficiently on as many OSes as Erlang runs on). The higher the reductions, the more work, in terms of CPU and function calls, a process is doing.
-* **memory**: Includes call stack, heap, and internal structures. `total_heap_size`, `min_bin_vheap_size`, `min_heap_size`, `fullsweep_after`, `heap_size`.
-* **messages**: A list of the messages to the process, which have not yet been processed, it is truncated when the term is too big.
-* **dictionary**: Dictionary is the process dictionary, it is truncated when the term is too big.
-* **current stack**: The current call stack back-trace (**stacktrace**) of the process. The stack has the same format as returned by `erlang:get_stacktrace/0`. The depth of the stacktrace is truncated according to `backtrace_depth` system flag setting.
-* **state**: Using [`sys:get_state(Pid, 2500)`](http://erlang.org/doc/man/sys.html#get_state-2) Gets the state of the process.
-
-### Network
-
-![Network](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/network.jpg)
-
-* **Byte input/output**: The byte of growth input/output during the refresh interval.
-* **Total input/output**: [`erlang:statistics(io)`](http://erlang.org/doc/man/erlang.html#statistics-1) returns `Input`, which is the total number of bytes received through ports, and `Output`, which is the total number of bytes output to ports.
-
-Fetches a given attribute from all inet ports (`TCP, UDP, SCTP`) and returns the biggest Num consumers by [`recon:inet_count/2`](http://ferd.github.io/recon/recon.html#inet_count-2) and [`recon:inet_windows/3`](http://ferd.github.io/recon/recon.html#inet_window-3). Attribute name refer to [`inet:getstat/1`](http://erlang.org/doc/man/inet.html#getstat-1).
-
-* `recv_oct`: Number of bytes received by the socket.
-* `recv_cnt`: Number of packets received by the socket.
-* `send_cnt`: Number of packets sent from the socket.
-* `send_oct`: Number of bytes sent from the socket.
-* `cnt`: `recv_cnt` + `send_cnt`.
-* `oct`: `recv_oct` + `send_oct`.
-
-When find out who is slowly but surely eating up all your bandwidth, enter the suspected port sequence(Integer) then press `Enter` will use [`recon:port_info/2`](http://ferd.github.io/recon/recon.html#port_info-2) to show a lot of information available about port.
-
-![Port](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/port_info.jpg)
-
-* **id**: internal index of a port. Of no particular use except to differentiate ports.
-* **name**: type of the port — with names such as `"tcp_inet"`, `"udp_inet"`, or `"efile"`.
-* **os_pid**: If the port is not an inet socket, but rather represents an external process or program, this value contains the os pid related to the said external program.
-* **connected**: Each port has a controlling process in charge of it, and this process’ pid is the connected one.
-* **links**: Ports can be linked with processes, much like other processes can be. The list of linked processes is contained here. Unless the process has been owned by or manually linked to a lot of processes, this should be safe to use.
-* **monitors**: Ports that represent external programs can have these programs end up monitoring Erlang processes. These processes are listed here.
-* **IO**: `input` the number of bytes read from the port. `output` the number of bytes written to the port.
-* **queue_size**: Port programs have a specific queue, called the driver queue. This returns the size of this queue.
-* **memory**: this is the memory allocated by the runtime system for the port. This number tends to be small-ish and excludes space allocated by the port itself.
-* **sockname/peername**: [`inet:sockname/1`](http://erlang.org/doc/man/inet.html#sockname-1) a list of all local address/port number pairs for a socket.
-* **statistics**: show port statistics by [`inet:getstat/2`](http://erlang.org/doc/man/inet.html#getstat-2).
-* **options**: show port options by [`inet:getopts/2`](http://erlang.org/doc/man/inet.html#getopts-2).
-
-### System
-
-![System](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/system.jpg)
-
-* **System Info**: [`erlang:system_info/1`](http://erlang.org/doc/man/erlang.html#system_info-1) returns various information about the allocators of the current system (emulator).
-* **Allocator Info**: [`recon_alloc:average_block_sizes(current|max)`](https://ferd.github.io/recon/recon_alloc.html#average_block_sizes-1) check all allocators in `allocator` and returns the average block sizes being used for mbcs and sbcs. This value is interesting to use because it will tell us how large most blocks are. This can be related to the VM's largest multiblock carrier size (lmbcs) and smallest multiblock carrier size (smbcs) to specify allocation strategies regarding the carrier sizes to be used.
-* **Cache Hit Rate**: [`recon_alloc:cache_hit_rates()`](https://ferd.github.io/recon/recon_alloc.html#cache_hit_rates-0) Cache can be tweaked using three VM flags: `+MMmcs`, `+MMrmcbf`, and `+MMamcbf`.
-* **Distribution buffers**: Uses [`erlang:dist_get_stat/1`](https://www.erlang.org/doc/man/erlang.html#dist_get_stat-1) on OTP 24+ to track per-node distribution queue sizes and the configured `dist_buf_busy_limit`.
-
-### ETS
-
-![Ets](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/ets.jpg)
-
-ETS tables are never garbage collected, and will maintain their memory usage as long as records will be left undeleted in a table. Only removing records manually (or deleting the table) will reclaim memory.
-
-Top N list sort by memory size, all items defined in [`ets:info/2`](http://erlang.org/doc/man/ets.html#info-2)
-
-### Mnesia
-
-![Mnesia](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/mnesia.jpg)
-
-Top N list sort by memory size, all items defined in [`mnesia:table_info/2`](http://erlang.org/doc/man/mnesia.html#table_info-2)
-
-### Application
-
-![Application](https://github.com/zhongwencool/observer_cli/raw/main/docs/images/application.png)
-
-The Application panel aggregates supervision data from [`application_controller:info()`](https://github.com/erlang/otp/blob/master/lib/kernel/src/application_controller.erl#L280), groups processes by their application master, and shows their live resource usage. Each row includes:
-
-- **No/App**: position in the table and the OTP application name. `no_group` collects processes that do not belong to any application supervisor.
-- **ProcessCount** (`p`): number of processes currently owned by that application. Toggle sorting with `p` to track churn.
-- **Memory** (`m`): total heap/stack memory used by those processes, formatted via `{byte, Size}`.
-- **Reductions** (`r`): cumulative reduction count, useful to spot CPU-heavy apps.
-- **MsgQ** (`mq`): total pending messages across the application’s processes.
-- **Status**: lifecycle state derived from `application_controller` (one of `Loading`, `Loaded`, `Starting`, `Started`, `StartPFalse`, or `Unknown`).
-- **Version**: semantic version reported by the application specification when available.
-
-Shortcuts follow the same pattern as other panels: `p/m/r/mq` switch the primary sort column, `F/B` paginate large installations, numeric input jumps to a row, and entering a PID delegates to the process view. Use `{interval, Milliseconds}` to adjust the refresh cadence.
+The generated ExDoc site provides `llms.txt`, a Markdown version of every page,
+and ExDoc's built-in **Copy Markdown** action. Build it locally with
+`rebar3 docs`.

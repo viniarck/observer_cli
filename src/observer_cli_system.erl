@@ -7,15 +7,19 @@
 -include_lib("kernel/include/net_address.hrl").
 
 %% API
--export([start/1]).
--export([clean/1]).
+-export([start/1, collect_allocator_info/0]).
 
 -ifdef(TEST).
 -export([
+    collect_distribution_info/0,
+    collect_os_process_info/1,
+    collect_system_info/1,
+    collect_sys_info/1,
     fill_info/2,
     to_list/1,
     info_fields/0,
     get_cachehit_info/2,
+    render_system_sections/1,
     render_sys_info/1,
     render_sys_info/4,
     render_cache_hit_rates/2,
@@ -23,7 +27,12 @@
     get_alloc/5,
     render_dist_node_info/1,
     get_address/1,
-    render_worker/3
+    render_worker/3,
+    get_dist_queue_size/1,
+    format_count_limit/2,
+    collect_runtime_info/0,
+    alloc_info/0,
+    maybe_system_info/1
 ]).
 -endif.
 
@@ -50,9 +59,6 @@ start(#view_opts{sys = #system{interval = Interval}} = ViewOpts) ->
     end),
     manager(Pid, ViewOpts).
 
--spec clean(list()) -> ok.
-clean(Pids) -> observer_cli_lib:exit_processes(Pids).
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -69,28 +75,11 @@ manager(Pid, #view_opts{sys = AllocatorOpts} = ViewOpts) ->
     end.
 
 render_worker(Cmd, Interval, LastTimeRef) ->
-    CacheHitInfo = recon_alloc:cache_hit_rates(),
-    AverageBlockCurs = recon_alloc:average_block_sizes(current),
-    AverageBlockMaxes = recon_alloc:average_block_sizes(max),
-    SbcsToMbcsCurs = observer_cli_lib:sbcs_to_mbcs(
-        ?UTIL_ALLOCATORS,
-        recon_alloc:sbcs_to_mbcs(current)
-    ),
-    SbcsToMbcsMaxs = observer_cli_lib:sbcs_to_mbcs(?UTIL_ALLOCATORS, recon_alloc:sbcs_to_mbcs(max)),
-    Sys = render_sys_info(Cmd),
+    SystemInfo = collect_system_info(Cmd),
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
-    Menu = observer_cli_lib:render_menu(allocator, Text),
-    BlockView = render_block_size_info(
-        AverageBlockCurs,
-        AverageBlockMaxes,
-        SbcsToMbcsCurs,
-        SbcsToMbcsMaxs
-    ),
-    DistNodesInfo = get_dist_nodes_info(),
-    DistNodeView = render_dist_node_info(DistNodesInfo),
-    HitView = render_cache_hit_rates(CacheHitInfo, erlang:length(CacheHitInfo)),
-    LastLine = observer_cli_lib:render_last_line("q(quit)"),
-    ?output([?CURSOR_TOP, Menu, Sys, BlockView, DistNodeView, HitView, LastLine]),
+    Menu = observer_cli_lib:render_top_menu(allocator, Text),
+    LastLine = observer_cli_lib:render_footer("q(quit)"),
+    ?output([?CURSOR_TOP, Menu] ++ render_system_sections(SystemInfo) ++ [LastLine]),
     NextTimeRef = observer_cli_lib:next_redraw(LastTimeRef, Interval),
     receive
         quit -> quit;
@@ -98,62 +87,151 @@ render_worker(Cmd, Interval, LastTimeRef) ->
         redraw -> render_worker(Cmd, Interval, NextTimeRef)
     end.
 
-get_dist_nodes_info() ->
+collect_system_info(Cmd) ->
+    {OsProcessInfo, SysInfo} = split_os_process_info(collect_sys_info(Cmd)),
+    #{
+        os_process_info => OsProcessInfo,
+        sys_info => SysInfo,
+        allocator_info => collect_allocator_info(),
+        dist_nodes_info => collect_distribution_info()
+    }.
+
+split_os_process_info(SysInfo) ->
+    lists:partition(
+        fun({Key, _}) -> lists:member(Key, [ps_cpu, ps_mem, ps_rss, ps_vsz]) end,
+        SysInfo
+    ).
+
+-spec collect_allocator_info() -> map().
+collect_allocator_info() ->
+    #{
+        cache_hit_info => recon_alloc:cache_hit_rates(),
+        average_block_curs => recon_alloc:average_block_sizes(current),
+        average_block_maxes => recon_alloc:average_block_sizes(max),
+        sbcs_to_mbcs_curs =>
+            observer_cli_lib:sbcs_to_mbcs(?UTIL_ALLOCATORS, recon_alloc:sbcs_to_mbcs(current)),
+        sbcs_to_mbcs_maxes =>
+            observer_cli_lib:sbcs_to_mbcs(?UTIL_ALLOCATORS, recon_alloc:sbcs_to_mbcs(max))
+    }.
+
+render_system_sections(SystemInfo) ->
+    [
+        render_system_info_section(SystemInfo),
+        render_allocator_section(SystemInfo),
+        render_distribution_node_section(SystemInfo),
+        render_cache_hit_section(SystemInfo)
+    ].
+
+render_system_info_section(#{os_process_info := OsProcessInfo, sys_info := SysInfo}) ->
+    render_sys_info(OsProcessInfo ++ SysInfo).
+
+render_allocator_section(#{
+    allocator_info := #{
+        average_block_curs := AverageBlockCurs,
+        average_block_maxes := AverageBlockMaxes,
+        sbcs_to_mbcs_curs := SbcsToMbcsCurs,
+        sbcs_to_mbcs_maxes := SbcsToMbcsMaxs
+    }
+}) ->
+    render_block_size_info(
+        AverageBlockCurs,
+        AverageBlockMaxes,
+        SbcsToMbcsCurs,
+        SbcsToMbcsMaxs
+    ).
+
+render_distribution_node_section(#{dist_nodes_info := DistNodesInfo}) ->
+    render_dist_node_info(DistNodesInfo).
+
+render_cache_hit_section(#{allocator_info := #{cache_hit_info := CacheHitInfo}}) ->
+    render_cache_hit_rates(CacheHitInfo, erlang:length(CacheHitInfo)).
+
+collect_distribution_info() ->
     case ets:info(sys_dist, size) of
         undefined ->
-            [];
+            [empty_distribution_info(unknown, "dist disabled")];
         0 ->
-            [];
+            [empty_distribution_info(ok, "no connected nodes")];
         _ ->
-            {ok, DistNodesInfo} = net_kernel:nodes_info(),
-            DistNodesInfo
+            Limit = erlang:system_info(dist_buf_busy_limit),
+            case net_kernel:nodes_info() of
+                {ok, []} ->
+                    [empty_distribution_info(ok, "no connected nodes")];
+                {ok, DistNodesInfo} ->
+                    [
+                        collect_distribution_node_info(DistNodeInfo, Limit)
+                     || DistNodeInfo <- DistNodesInfo
+                    ]
+            end
     end.
 
+empty_distribution_info(Health, Detail) ->
+    {node(), #{
+        health => Health,
+        queue_size => undefined,
+        queue_limit => undefined,
+        address => Detail,
+        in => "-",
+        out => "-",
+        type => "-",
+        state => "-"
+    }}.
+
+collect_distribution_node_info({Node, Info}, Limit) ->
+    {Node, #{
+        queue_size => get_dist_queue_size(Node),
+        queue_limit => Limit,
+        address => get_address(Info),
+        in => proplists:get_value(in, Info),
+        out => proplists:get_value(out, Info),
+        type => proplists:get_value(type, Info),
+        state => proplists:get_value(state, Info)
+    }}.
+
 render_dist_node_info([]) ->
-    [];
+    render_dist_node_info([empty_distribution_info(ok, "no connected nodes")]);
 render_dist_node_info(DistNodesInfo) ->
-    [NodeW, QueueW, PercentW, AddressW, InW, OutW, TypeW, StateW] = dist_node_widths(),
+    [HealthW, NodeW, QueueW, PercentW, AddressW, InW, OutW, TypeW, StateW] = dist_node_widths(),
     Title = ?render([
         ?UNDERLINE,
-        ?GRAY_BG,
-        ?W("Node", NodeW),
-        ?W("Dist Node Queue Size Bytes", QueueW),
-        ?W("Percent", PercentW),
-        ?W("Address", AddressW),
-        ?W("In", InW),
-        ?W("Out", OutW),
-        ?W("Type", TypeW),
-        ?W("State", StateW)
+        ?W2(?GRAY_BG, "Health", HealthW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Node", NodeW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Dist Queue", QueueW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Percent", PercentW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Address", AddressW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "In", InW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Out", OutW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "Type", TypeW),
+        ?UNDERLINE,
+        ?W2(?GRAY_BG, "State", StateW)
     ]),
-    Limit = erlang:system_info(dist_buf_busy_limit),
-    LimitStr = integer_to_list(Limit),
     View = lists:map(
         fun({Node, Info}) ->
-            State = proplists:get_value(state, Info),
-            Type = proplists:get_value(type, Info),
-            Address = get_address(Info),
-            In = proplists:get_value(in, Info),
-            Out = proplists:get_value(out, Info),
-            QueueSize = get_dist_queue_size(Node),
-            QueueSizeStr = observer_cli_lib:to_list(QueueSize),
-            QueueSizeLimitStr = QueueSizeStr ++ "/" ++ LimitStr,
-            Percent =
-                case is_integer(QueueSize) of
-                    true ->
-                        Float = QueueSize / Limit,
-                        [erlang:float_to_list(Float * 100, [{decimals, 2}]), $%];
-                    false ->
-                        "unsupported"
-                end,
+            State = maps:get(state, Info),
+            Type = maps:get(type, Info),
+            Address = maps:get(address, Info),
+            In = maps:get(in, Info),
+            Out = maps:get(out, Info),
+            QueueSize = maps:get(queue_size, Info),
+            Limit = maps:get(queue_limit, Info),
+            Health = maps:get(health, Info, dist_node_health(Info)),
             ?render([
-                ?W(Node, NodeW),
-                ?W(QueueSizeLimitStr, QueueW),
-                ?W(Percent, PercentW),
-                ?W(Address, AddressW),
-                ?W(In, InW),
-                ?W(Out, OutW),
-                ?W(Type, TypeW),
-                ?W(State, StateW)
+                ?W2(dist_health_color(Health), Health, HealthW),
+                ?W2(?RESET, Node, NodeW),
+                ?W2(?RESET, dist_queue_text(QueueSize, Limit), QueueW),
+                ?W2(?RESET, dist_percent_text(QueueSize, Limit), PercentW),
+                ?W2(?RESET, Address, AddressW),
+                ?W2(?RESET, In, InW),
+                ?W2(?RESET, Out, OutW),
+                ?W2(?RESET, Type, TypeW),
+                ?W2(?RESET, State, StateW)
             ])
         end,
         lists:sort(DistNodesInfo)
@@ -162,9 +240,38 @@ render_dist_node_info(DistNodesInfo) ->
 
 dist_node_widths() ->
     observer_cli_lib:weighted_widths(
-        [30, 20, 7, 19, 11, 11, 7, 10],
-        [4, 1, 0, 4, 0, 0, 0, 0]
+        [7, 28, 14, 7, 20, 10, 10, 7, 8],
+        [0, 4, 1, 0, 4, 0, 0, 0, 0]
     ).
+
+dist_node_health(#{state := State}) when State =/= up ->
+    down;
+dist_node_health(#{queue_size := QueueSize}) when not is_integer(QueueSize) ->
+    unknown;
+dist_node_health(#{queue_size := QueueSize, queue_limit := Limit}) when
+    is_integer(QueueSize), is_integer(Limit), Limit > 0, QueueSize / Limit >= 0.85
+->
+    warn;
+dist_node_health(_Info) ->
+    ok.
+
+dist_health_color(ok) -> ?GREEN;
+dist_health_color(warn) -> ?YELLOW;
+dist_health_color(down) -> ?RED;
+dist_health_color(unknown) -> ?YELLOW.
+
+dist_queue_text(undefined, undefined) ->
+    "-";
+dist_queue_text(QueueSize, Limit) ->
+    observer_cli_lib:to_list(QueueSize) ++ "/" ++ observer_cli_lib:to_list(Limit).
+
+dist_percent_text(undefined, undefined) ->
+    "-";
+dist_percent_text(QueueSize, Limit) when is_integer(QueueSize), is_integer(Limit), Limit > 0 ->
+    Float = QueueSize / Limit,
+    [erlang:float_to_list(Float * 100, [{decimals, 2}]), $%];
+dist_percent_text(_QueueSize, _Limit) ->
+    "unsupported".
 
 get_address(Info) ->
     #net_address{address = Address} = proplists:get_value(address, Info, #net_address{}),
@@ -340,8 +447,7 @@ get_alloc(Key, Curs, Maxes, STMCurs, STMMaxes) ->
         proplists:get_value(Key, STMMaxes)
     ].
 
-render_sys_info(Cmd) ->
-    SysInfo = sys_info(Cmd),
+render_sys_info(SysInfo) ->
     {Info, Stat} = info_fields(),
     SystemAndCPU = fill_info(Info, SysInfo),
     MemAndStatistics = fill_info(Stat, SysInfo),
@@ -349,7 +455,10 @@ render_sys_info(Cmd) ->
     CPU = proplists:get_value("CPU's and Threads", SystemAndCPU),
     {_, _, Memory} = lists:keyfind("Memory Usage", 1, MemAndStatistics),
     {_, _, Statistics} = lists:keyfind("Statistics", 1, MemAndStatistics),
-    render_sys_info(System, CPU, Memory, Statistics).
+    render_sys_info(System, CPU, Memory, Statistics) ++ render_runtime_limit_info(SysInfo).
+
+collect_sys_info(Cmd) ->
+    collect_os_process_info(Cmd) ++ collect_runtime_info().
 
 render_sys_info(System, CPU, Memory, Statistics) ->
     [
@@ -442,7 +551,88 @@ sys_info_row_widths() ->
 compiled_for_widths() ->
     observer_cli_lib:weighted_widths([22, 111], [0, 1]).
 
-sys_info(Cmd) ->
+render_runtime_limit_info(SysInfo) ->
+    Widths = [Metric1W, Value1W, Metric2W, Value2W, Metric3W, Value3W] = runtime_limit_widths(),
+    Title = ?render([
+        ?UNDERLINE,
+        ?GRAY_BG,
+        ?W("System Statistics / Limit", Metric1W),
+        ?W("Value", Value1W),
+        ?W("System Statistics / Limit", Metric2W),
+        ?W("Value", Value2W),
+        ?W("System Statistics / Limit", Metric3W),
+        ?W("Value", Value3W)
+    ]),
+    Rows = [
+        [
+            {"Processes", format_count_limit(process_count, process_limit, SysInfo)},
+            {"Dirty CPU schedulers", to_list(proplists:get_value(dirty_cpu_schedulers, SysInfo))},
+            {"Distribution buffer busy limit",
+                to_list(proplists:get_value(dist_buf_busy_limit, SysInfo))}
+        ],
+        [
+            {"Ports", format_count_limit(port_count, port_limit, SysInfo)},
+            {"Online dirty CPU schedulers",
+                to_list(proplists:get_value(dirty_cpu_schedulers_online, SysInfo))},
+            {"Modules", to_list(proplists:get_value(module_count, SysInfo))}
+        ],
+        [
+            {"Atoms", format_count_limit(atom_count, atom_limit, SysInfo)},
+            {"Run Queue", to_list(proplists:get_value(run_queue, SysInfo))},
+            {"ETS", format_count_limit(ets_count, ets_limit, SysInfo)}
+        ]
+    ],
+    [Title | [render_runtime_limit_row(Row, Widths) || Row <- Rows]].
+
+render_runtime_limit_row(
+    [{Name1, Value1}, {Name2, Value2}, {Name3, Value3}],
+    [Metric1W, Value1W, Metric2W, Value2W, Metric3W, Value3W]
+) ->
+    ?render([
+        ?W(Name1, Metric1W),
+        ?W(Value1, Value1W),
+        ?W(Name2, Metric2W),
+        ?W(Value2, Value2W),
+        ?W(Name3, Metric3W),
+        ?W(Value3, Value3W)
+    ]).
+
+runtime_limit_widths() ->
+    observer_cli_lib:weighted_widths([30, 10, 30, 10, 30, 11], [0, 1, 0, 1, 0, 1]).
+
+format_count_limit(CountKey, LimitKey, SysInfo) ->
+    Count = proplists:get_value(CountKey, SysInfo),
+    Limit = proplists:get_value(LimitKey, SysInfo),
+    format_count_limit(Count, Limit).
+
+format_count_limit(Count, Limit) when is_integer(Count), is_integer(Limit), Limit > 0 ->
+    [
+        integer_to_list(Count),
+        " / ",
+        integer_to_list(Limit),
+        " (",
+        observer_cli_lib:to_percent(Count / Limit),
+        " used)"
+    ];
+format_count_limit(Count, Limit) ->
+    [to_list(Count), " / ", to_list(Limit)].
+
+collect_os_process_info(Cmd) ->
+    [_, CmdValue | _] = string:split(os:cmd(Cmd), "\n", all),
+    [CpuPsV, MemPsV, RssPsV, VszPsV] =
+        case lists:filter(fun(Y) -> Y =/= [] end, string:split(CmdValue, " ", all)) of
+            [] -> ["--", "--", "--", "--"];
+            [V1, V2, V3, V4] -> [V1, V2, list_to_integer(V3) * 1024, list_to_integer(V4) * 1024]
+        end,
+
+    [
+        {ps_cpu, CpuPsV ++ "%"},
+        {ps_mem, MemPsV ++ "%"},
+        {ps_rss, RssPsV},
+        {ps_vsz, VszPsV}
+    ].
+
+collect_runtime_info() ->
     MemInfo =
         try erlang:memory() of
             Mem -> Mem
@@ -456,19 +646,9 @@ sys_info(Cmd) ->
             enabled -> SchedulersOnline;
             _ -> 1
         end,
-    [_, CmdValue | _] = string:split(os:cmd(Cmd), "\n", all),
-    [CpuPsV, MemPsV, RssPsV, VszPsV] =
-        case lists:filter(fun(Y) -> Y =/= [] end, string:split(CmdValue, " ", all)) of
-            [] -> ["--", "--", "--", "--"];
-            [V1, V2, V3, V4] -> [V1, V2, list_to_integer(V3) * 1024, list_to_integer(V4) * 1024]
-        end,
-
     {{_, Input}, {_, Output}} = erlang:statistics(io),
     [
-        {ps_cpu, CpuPsV ++ "%"},
-        {ps_mem, MemPsV ++ "%"},
-        {ps_rss, RssPsV},
-        {ps_vsz, VszPsV},
+        {run_queue, erlang:statistics(run_queue)},
         {io_input, Input},
         {io_output, Output},
 
@@ -478,6 +658,8 @@ sys_info(Cmd) ->
         {schedulers, erlang:system_info(schedulers)},
         {schedulers_online, SchedulersOnline},
         {schedulers_available, SchedulersAvailable},
+        {dirty_cpu_schedulers, maybe_system_info(dirty_cpu_schedulers)},
+        {dirty_cpu_schedulers_online, maybe_system_info(dirty_cpu_schedulers_online)},
 
         {otp_release, erlang:system_info(otp_release)},
         {version, erlang:system_info(version)},
@@ -488,7 +670,17 @@ sys_info(Cmd) ->
         {thread_pool_size, erlang:system_info(thread_pool_size)},
         {wordsize_internal, erlang:system_info({wordsize, internal})},
         {wordsize_external, erlang:system_info({wordsize, external})},
-        {alloc_info, alloc_info()}
+        {alloc_info, alloc_info()},
+        {module_count, erlang:length(code:all_loaded())},
+        {process_count, erlang:system_info(process_count)},
+        {process_limit, erlang:system_info(process_limit)},
+        {port_count, erlang:system_info(port_count)},
+        {port_limit, erlang:system_info(port_limit)},
+        {atom_count, erlang:system_info(atom_count)},
+        {atom_limit, maybe_system_info(atom_limit)},
+        {ets_count, maybe_system_info(ets_count)},
+        {ets_limit, maybe_system_info(ets_limit)},
+        {dist_buf_busy_limit, maybe_system_info(dist_buf_busy_limit)}
         | MemInfo
     ].
 
@@ -498,6 +690,13 @@ alloc_info() ->
         Allocators -> Allocators
     catch
         _:_ -> []
+    end.
+
+maybe_system_info(Key) ->
+    try erlang:system_info(Key) of
+        Value -> Value
+    catch
+        _:badarg -> undefined
     end.
 
 fill_info([{dynamic, Key} | Rest], Data) when is_atom(Key) ->
