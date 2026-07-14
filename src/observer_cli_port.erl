@@ -2,7 +2,7 @@
 
 -include("observer_cli.hrl").
 
--export([start/1, start/2]).
+-export([start/1, start/2, sock_opts/0]).
 
 -ifdef(TEST).
 -export([
@@ -24,10 +24,18 @@
     render_stats/1,
     render_opts/1,
     select_port/2,
-    sock_opts/0,
     render_menu/2,
     output_die_view/2,
-    get_menu_title/1
+    get_menu_title/1,
+    keep_port/1,
+    port_overview/2,
+    sort_value/2,
+    port_controls/2,
+    monitor_count/1,
+    collect_sock_opts/1,
+    collect_sock_opt_result/2,
+    monitor_to_list/1,
+    render_option_rows/2
 ]).
 -endif.
 
@@ -383,6 +391,7 @@ port_type_value(Key, Type) ->
         false -> undefined
     end.
 
+-spec sock_opts() -> [atom()].
 sock_opts() ->
     [
         active,
@@ -426,14 +435,16 @@ collect_sock_opts(_Port, [], Acc) ->
 collect_sock_opts(Port, [Opt | Opts], Acc) ->
     Value =
         try inet:getopts(Port, [Opt]) of
-            {ok, [Res]} -> Res;
-            {ok, []} -> {Opt, "-"};
-            {error, einval} -> {Opt, "Not Supported"};
-            {error, Reason} -> {Opt, io_lib:format("error:~p", [Reason])}
+            Result -> collect_sock_opt_result(Opt, Result)
         catch
             _:_ -> {Opt, "Not Supported"}
         end,
     collect_sock_opts(Port, Opts, [Value | Acc]).
+
+collect_sock_opt_result(_Opt, {ok, [Result]}) -> Result;
+collect_sock_opt_result(Opt, {ok, []}) -> {Opt, "-"};
+collect_sock_opt_result(Opt, {error, einval}) -> {Opt, "Not Supported"};
+collect_sock_opt_result(Opt, {error, Reason}) -> {Opt, io_lib:format("error:~p", [Reason])}.
 
 next_draw_view(TimeRef, Interval, Port) ->
     NewTimeRef = observer_cli_lib:next_redraw(TimeRef, Interval),
@@ -817,7 +828,7 @@ get_menu_title(Type) ->
     ].
 
 parse_cmd() ->
-    parse_cmd_str(observer_cli_lib:to_list(io:get_line(""))).
+    parse_cmd_str(observer_cli_lib:read_cmd()).
 
 parse_cmd_str(Key) ->
     case Key of

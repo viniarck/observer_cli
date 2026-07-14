@@ -15,7 +15,8 @@
     find_group_leader/1,
     app_render_info/4,
     render_app_info/3,
-    update_app_stats/6
+    update_app_stats/6,
+    leader_info/1
 ]).
 -endif.
 
@@ -351,6 +352,8 @@ get_version(App, Maps) ->
         _ -> "unknown"
     end.
 
+find_group_leader(Pid) when node(Pid) =/= node() ->
+    no_group;
 find_group_leader(Pid) ->
     case erlang:process_info(Pid, group_leader) of
         undefined -> no_group;

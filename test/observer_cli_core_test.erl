@@ -115,7 +115,19 @@ render_system_line_missing_output_test() ->
 accept_net_ticktime_result_test() ->
     ?assertEqual(ok, observer_cli:accept_net_ticktime_result(change_initiated, 60)),
     ?assertEqual(ok, observer_cli:accept_net_ticktime_result({ongoing_change_to, 60}, 60)),
+    ?assertEqual(
+        {error, connection, connection_failed},
+        observer_cli:accept_net_ticktime_result({ongoing_change_to, 30}, 60)
+    ),
     ?assertEqual(ok, observer_cli:accept_net_ticktime_result(unchanged, 60)).
+
+update_net_ticktime_from_disconnected_node_test() ->
+    {ok, Host} = inet:gethostname(),
+    MissingNode = list_to_atom("observer_cli_missing_ticktime@" ++ Host),
+    ?assertEqual(
+        {error, connection, connection_failed},
+        observer_cli:update_net_ticktime_from(MissingNode)
+    ).
 
 render_memory_process_line_test() ->
     MemSum = {1, 2, 3, 4},
@@ -289,6 +301,8 @@ render_top_n_view_test() ->
     ?assertEqual(3, length(Rows3)),
     ?assertEqual(2, length(PidList4)),
     ?assertEqual(3, length(Rows4)),
+    ExpectedHeap = observer_cli_lib:to_byte(1000 * erlang:system_info(wordsize)),
+    ?assertNotEqual(nomatch, string:find(observer_cli_test_io:plain(Rows4), ExpectedHeap)),
     ?assertEqual(2, length(PidList5)),
     ?assertEqual(3, length(Rows5)),
     erlang:exit(Pid2, kill),
@@ -451,6 +465,25 @@ node_stats_test() ->
 
 check_auto_row_test() ->
     ?assert(is_boolean(observer_cli:check_auto_row())).
+
+private_home_layout_contract_test() ->
+    ?assertEqual([], observer_cli:join_home_summary_rows([])),
+    ?assertNotEqual(
+        [],
+        observer_cli:join_home_summary_rows([
+            {normal, [{"one", 10}]}
+        ])
+    ),
+    ?assertNotEqual(
+        [],
+        observer_cli:join_home_summary_rows([
+            {normal, [{"one", 10}]}, {normal, [{"two", 10}]}
+        ])
+    ),
+    ?assertEqual(0, observer_cli:scheduler_usage_rows(undefined)),
+    ?assertEqual(2, observer_cli:scheduler_usage_rows([a, b, c])),
+    ?assertEqual(3, observer_cli:scheduler_usage_rows(lists:seq(1, 12))),
+    ?assertEqual(11, observer_cli:scheduler_usage_rows(lists:seq(1, 101))).
 
 home_summary_widths(IoData) ->
     Header =

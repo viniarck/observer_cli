@@ -30,6 +30,24 @@ start_state_view_success_action_test() ->
     ?assert(is_pid(Pid)),
     ?assertEqual(true, run_start(["S\n", "P\n", "q\n"], Pid)).
 
+state_view_none_returns_to_manager_test() ->
+    RenderPid = spawn(fun() ->
+        receive
+            quit -> ok
+        end
+    end),
+    self() ! {state_view_done, {ok, none}},
+    observer_cli_test_io:with_input(
+        ["q\n"],
+        fun() ->
+            Opts = #view_opts{auto_row = false},
+            ?assertEqual(
+                true,
+                observer_cli_process:wait_for_state_view(RenderPid, home, self(), Opts)
+            )
+        end
+    ).
+
 start_view_switch_test() ->
     Pid = spawn(fun() -> receive
         after infinity -> ok
@@ -158,6 +176,17 @@ collect_process_info_test() ->
         ?assert(is_integer(maps:get(heap_size, Process))),
         ?assert(is_integer(maps:get(total_heap_size, Process))),
         ?assert(is_integer(maps:get(stack_size, Process))),
+        {garbage_collection, RawGC} = erlang:process_info(Target, garbage_collection),
+        GC = maps:get(garbage_collection, Process),
+        WordSize = erlang:system_info(wordsize),
+        ?assertEqual(
+            proplists:get_value(min_bin_vheap_size, RawGC) * WordSize,
+            maps:get(min_bin_vheap_size, GC)
+        ),
+        ?assertEqual(
+            proplists:get_value(min_heap_size, RawGC) * WordSize,
+            maps:get(min_heap_size, GC)
+        ),
         ?assertMatch({_, _}, maps:get(binary_refs, Process)),
         ?assert(is_atom(maps:get(priority, Process))),
         ?assert(is_integer(maps:get(catchlevel, Process))),
@@ -717,6 +746,86 @@ render_worker_next_draw_actions_test() ->
     stop_worker(Worker),
     exit(Target, kill).
 
+render_worker_shrinking_redraw_clears_test() ->
+    Target = spawn(fun() -> receive
+        after infinity -> ok
+        end end),
+    try
+        MessageOutput = capture_redraw(
+            message,
+            Target,
+            observer_cli_process:render_process_messages(#{
+                pid => Target, message_queue_len => 1, messages => [message_before_shrink]
+            })
+        ),
+        assert_clear_between(MessageOutput, "message_before_shrink", "No messages"),
+
+        DictionaryOutput = capture_redraw(
+            dict,
+            Target,
+            observer_cli_process:render_process_dictionary(#{
+                pid => Target, dictionary => [{observer_cli_redraw_key, value}]
+            })
+        ),
+        assert_clear_between(
+            DictionaryOutput, "observer_cli_redraw_key", "No dictionary"
+        ),
+
+        StackOutput = capture_redraw(
+            stack,
+            Target,
+            observer_cli_process:render_process_stack([
+                {old_stack, frame, 0, [{file, "old.erl"}, {line, 1}]},
+                {old_stack, caller, 0, [{file, "old.erl"}, {line, 2}]}
+            ])
+        ),
+        assert_clear_between(StackOutput, "old_stack:caller/0", "current_stacktrace"),
+
+        Ref = erlang:monitor(process, Target),
+        exit(Target, kill),
+        receive
+            {'DOWN', Ref, process, Target, _} -> ok
+        after 1000 ->
+            exit(fixture_exit_timeout)
+        end,
+        DeadOutput = capture_redraw(info, Target, "old process detail\nstale tail\n"),
+        assert_clear_between(DeadOutput, "stale tail", "has already died.")
+    after
+        erlang:is_process_alive(Target) andalso exit(Target, kill)
+    end.
+
+capture_redraw(Status, Target, PreviousBody) ->
+    {ok, Output} = observer_cli_test_io:capture_with_geometry(
+        24,
+        205,
+        [],
+        fun() ->
+            Worker = spawn(fun() ->
+                io:put_chars(PreviousBody),
+                observer_cli_process:render_worker(
+                    Status,
+                    home,
+                    1500,
+                    Target,
+                    ?INIT_TIME_REF,
+                    queue:new(),
+                    queue:new(),
+                    self()
+                )
+            end),
+            Worker ! redraw,
+            stop_worker(Worker)
+        end
+    ),
+    unicode:characters_to_binary(Output).
+
+assert_clear_between(Output, Before, After) ->
+    {BeforePos, _} = binary:match(Output, list_to_binary(Before)),
+    {ClearPos, _} = binary:match(Output, ?CLEAR),
+    [{AfterPos, _} | _] = lists:reverse(binary:matches(Output, list_to_binary(After))),
+    ?assert(BeforePos < ClearPos),
+    ?assert(ClearPos < AfterPos).
+
 spawn_worker(Type, TargetPid) ->
     Parent = self(),
     spawn(fun() ->
@@ -867,5 +976,149 @@ wider_columns({BaseTitle, BaseRow}, {WideTitle, WideRow}, Columns) ->
         lists:nth(Pos, WideTitle) > lists:nth(Pos, BaseTitle),
         lists:nth(Pos, WideRow) > lists:nth(Pos, BaseRow)
     ].
+
+safe_diagnostics_process_info_and_name_resolution_test() ->
+    Parent = self(),
+    Name = observer_cli_goal08_fixture,
+    _ExistingUnregistered = observer_cli_goal08_unregistered,
+    Pid = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    true = register(Name, Pid),
+    Source = #{
+        count_fun => fun() -> 1 end,
+        fold => {fixture_list, fun(_Fun, Acc) -> Acc end},
+        info_fun => fun(Target, Keys) ->
+            Parent ! {detail_keys, Target, Keys},
+            detail_info(Keys)
+        end,
+        sleep_fun => fun(_Duration) -> ok end,
+        monotonic_fun => fun() -> 0 end,
+        whereis_fun => fun erlang:whereis/1,
+        alive_fun => fun erlang:is_process_alive/1
+    },
+    try
+        #{<<"status">> := <<"ok">>, <<"result">> := Response} =
+            observer_cli_snapshot:dispatch(
+                self(),
+                process,
+                #{target => atom_to_binary(Name), test_process_source => Source},
+                #{timeout_ms => 3000, identifier_policy => include}
+            ),
+        receive
+            {detail_keys, Pid, Keys} ->
+                ?assertEqual(
+                    [
+                        registered_name,
+                        status,
+                        current_function,
+                        initial_call,
+                        memory,
+                        message_queue_len,
+                        reductions,
+                        heap_size,
+                        total_heap_size,
+                        stack_size,
+                        group_leader,
+                        binary,
+                        garbage_collection,
+                        garbage_collection_info,
+                        priority,
+                        links,
+                        monitors,
+                        monitored_by,
+                        catchlevel,
+                        suspending,
+                        error_handler,
+                        trap_exit,
+                        current_stacktrace
+                    ],
+                    Keys
+                )
+        end,
+        Data = maps:get(<<"data">>, Response),
+        Forbidden = [
+            <<"messages">>,
+            <<"dictionary">>,
+            <<"state">>
+        ],
+        ?assertEqual([], [Key || Key <- Forbidden, maps:is_key(Key, Data)]),
+        ?assertEqual(80, maps:get(<<"heap_size_bytes">>, Data)),
+        ?assertEqual(160, maps:get(<<"total_heap_size_bytes">>, Data)),
+        ?assertEqual(<<"running">>, maps:get(<<"status">>, Data)),
+        ?assert(is_binary(maps:get(<<"group_leader">>, Data))),
+        AtomCount = erlang:system_info(atom_count),
+        Missing = <<"observer_cli_goal08_atom_that_must_not_exist_987654321">>,
+        ?assertEqual(not_found, observer_cli_snapshot:resolve_process_target(Missing, Source)),
+        ?assertEqual(
+            not_found,
+            observer_cli_snapshot:resolve_process_target(
+                <<"observer_cli_goal08_unregistered">>, Source
+            )
+        ),
+        ?assertEqual(AtomCount, erlang:system_info(atom_count)),
+        ?assertEqual(
+            {ok, Pid},
+            observer_cli_snapshot:resolve_process_target(list_to_binary(pid_to_list(Pid)), Source)
+        ),
+        ?assertEqual(
+            not_found, observer_cli_snapshot:resolve_process_target(<<"<0.bad.0>">>, Source)
+        )
+    after
+        unregister(Name),
+        exit(Pid, kill)
+    end.
+
+detail_info(Keys) ->
+    Values = #{
+        registered_name => observer_cli_goal08_fixture,
+        status => running,
+        current_function => {?MODULE, detail_info, 1},
+        initial_call => {?MODULE, detail_info, 1},
+        memory => 256,
+        message_queue_len => 0,
+        reductions => 7,
+        heap_size => 10,
+        total_heap_size => 20,
+        stack_size => 3,
+        group_leader => self(),
+        garbage_collection => [
+            {min_bin_vheap_size, 2},
+            {min_heap_size, 3},
+            {fullsweep_after, 11},
+            {minor_gcs, 99}
+        ],
+        garbage_collection_info => [{heap_size, 10}, {minor_gcs, 99}, {secret, true}]
+    },
+    [{Key, maps:get(Key, Values, undefined)} || Key <- Keys].
+
+process_private_helper_contract_test() ->
+    ?assertEqual(
+        {2, 10},
+        observer_cli_process:binary_refs_summary([
+            {ref, 10, 1}, invalid
+        ])
+    ),
+    ?assertEqual("0", observer_cli_process:format_suspending([])),
+    ?assert(is_list(observer_cli_process:format_suspending([self(), self(), self(), self()]))),
+    ?assertMatch(
+        #{binary_refs := _},
+        observer_cli_process:collect_process_extra(
+            self(), erlang:system_info(wordsize)
+        )
+    ),
+    Dead = spawn(fun() -> ok end),
+    Mon = erlang:monitor(process, Dead),
+    receive
+        {'DOWN', Mon, process, Dead, normal} -> ok
+    end,
+    ?assertEqual(
+        dead,
+        observer_cli_process:collect_process_extra(
+            Dead, erlang:system_info(wordsize)
+        )
+    ).
 
 -endif.

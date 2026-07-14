@@ -72,6 +72,16 @@ get_terminal_rows_test() ->
         end
     ).
 
+read_cmd_failure_paths_test() ->
+    observer_cli_test_io:with_input(
+        [],
+        fun() -> ?assertEqual({error, eof}, observer_cli_lib:read_cmd()) end
+    ),
+    observer_cli_test_io:with_input(
+        [{error, estale}],
+        fun() -> ?assertEqual({error, estale}, observer_cli_lib:read_cmd()) end
+    ).
+
 parse_cmd_quit_test() ->
     observer_cli_test_io:with_input(
         ["q\n"],
@@ -84,7 +94,7 @@ parse_cmd_quit_test() ->
 parse_cmd_top_menu_routes_test() ->
     [
         route_shared_command(Cmd)
-     || Cmd <- ["H\n", "S\n", "A\n", "N\n", "O\n", "M\n", "E\n", "D\n", "P\n"]
+     || Cmd <- ["H\n", "S\n", "A\n", "N\n", "O\n", "K\n", "M\n", "E\n", "D\n", "P\n"]
     ].
 
 parse_cmd_top_menu_exits_plain_pids_test() ->
@@ -236,6 +246,13 @@ home_parse_cmd_str_test() ->
         {"<0.0.0>\n", {go_to_pid, list_to_pid("<0.0.0>")}},
         {">12\n", {go_to_pid, list_to_pid("<0.12.0>")}},
         {">\n", quit}
+    ]).
+
+malformed_pid_parse_test() ->
+    assert_shared_parse([
+        {"<a.b.c>\n", quit},
+        {">not-a-number\n", quit},
+        {"<0." ++ lists:duplicate(100, $9) ++ ".0>\n", quit}
     ]).
 
 assert_shared_parse(Cases) ->
@@ -410,5 +427,17 @@ exit_processes_test() ->
     observer_cli_lib:exit_processes([Pid1, Pid2]),
     ?assertEqual(false, is_process_alive(Pid1)),
     ?assertEqual(false, is_process_alive(Pid2)).
+
+private_layout_helper_contract_test() ->
+    ?assertEqual([1, 2], observer_cli_lib:add_extra_remainder([1, 2], [1, 1], 0)),
+    ?assertEqual([], observer_cli_lib:add_extra_remainder([], [], 1)),
+    ?assertEqual([1, 3], observer_cli_lib:add_extra_remainder([1, 2], [0, 1], 1)),
+    ?assertEqual(<<>>, observer_cli_lib:join_lines([])),
+    ?assertEqual(<<"one">>, observer_cli_lib:join_lines([<<"one">>])),
+    ?assertEqual(
+        <<"one\ntwo">>,
+        iolist_to_binary(observer_cli_lib:join_lines([<<"one">>, <<"two">>]))
+    ),
+    ?assert(is_integer(observer_cli_lib:get_terminal_rows(true))).
 
 -endif.

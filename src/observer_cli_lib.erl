@@ -7,6 +7,7 @@
 
 %% API
 -export([parse_cmd/3]).
+-export([read_cmd/0]).
 -export([uptime/0]).
 -export([to_percent/1]).
 -export([to_list/1]).
@@ -48,7 +49,7 @@
 -export([pipe/2]).
 
 -ifdef(TEST).
--export([visible_length/1]).
+-export([visible_length/1, add_extra_remainder/3, join_lines/1]).
 -endif.
 
 -spec uptime() -> list().
@@ -207,7 +208,7 @@ to_str(Term) -> to_list(Term).
 
 -spec parse_cmd(view_opts(), atom(), list()) -> atom() | string() | tuple().
 parse_cmd(ViewOpts, Module, Args) ->
-    case observer_cli_command:parse_shared(to_list(io:get_line(""))) of
+    case observer_cli_command:parse_shared(read_cmd()) of
         home_view ->
             clean_before_route(Module, Args),
             observer_cli:start(ViewOpts);
@@ -240,6 +241,14 @@ parse_cmd(ViewOpts, Module, Args) ->
             observer_cli_plugin:start(ViewOpts);
         Action ->
             Action
+    end.
+
+-spec read_cmd() -> string() | {error, term()}.
+read_cmd() ->
+    case io:get_line("") of
+        eof -> {error, eof};
+        {error, _Reason} = Error -> Error;
+        Line -> to_list(Line)
     end.
 
 clean_before_route(observer_cli, Args) ->

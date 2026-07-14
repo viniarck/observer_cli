@@ -2,7 +2,16 @@ name: ci
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -13,29 +22,142 @@ jobs:
       matrix:
         include:
           - otp: '29'
-            rebar3: '3.26'
+            rebar3: '3.27'
+            other_otp: '26'
           - otp: '28'
             rebar3: '3.24'
           - otp: '27'
             rebar3: '3.22'
           - otp: '26'
             rebar3: '3.22'
+            other_otp: '29'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: Install cross-OTP target
+        if: matrix.other_otp != ''
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{matrix.other_otp}}
+      - name: Save cross-OTP target
+        if: matrix.other_otp != ''
+        run: |
+          mv "$INSTALL_DIR_FOR_OTP" "$RUNNER_TEMP/cross-otp"
+          "$RUNNER_TEMP/cross-otp/Install" -minimal "$RUNNER_TEMP/cross-otp"
+          echo "OBSERVER_CLI_CROSS_OTP_ERL=$RUNNER_TEMP/cross-otp/bin/erl" >> "$GITHUB_ENV"
       - uses: erlef/setup-beam@v1
         with:
           otp-version: ${{matrix.otp}}
           rebar3-version: ${{matrix.rebar3}}
+      - name: formatting
+        run: rebar3 fmt --check
       - name: quality checks
-        run: rebar3 check
+        run: rebar3 as ci check
+      - name: generated escript smoke
+        run: scripts/escript-smoke.sh
+      - name: Ubuntu installer smoke
+        if: matrix.otp == '29'
+        run: |
+          docker run --rm -i -v "$PWD:/src:ro" ubuntu:24.04 sh -euxs <<'SMOKE'
+          ! command -v shasum
+          mkdir -p /tmp/bin /tmp/release
+          ln -s /bin/true /tmp/bin/escript
+          cat > /tmp/bin/curl <<'SH'
+          #!/bin/sh
+          cp "/tmp/release/${2##*/}" "$4"
+          SH
+          cat > /tmp/bin/erl <<'SH'
+          #!/bin/sh
+          printf 29
+          SH
+          cat > /tmp/release/observer_cli-2.0.0-otp29 <<'SH'
+          #!/bin/sh
+          printf '%s\n' 'observer_cli 2.0.0' 'controller OTP 29'
+          SH
+          chmod +x /tmp/bin/curl /tmp/bin/erl /tmp/release/observer_cli-2.0.0-otp29
+          (cd /tmp/release && sha256sum observer_cli-2.0.0-otp29 > SHA256SUMS)
+          HOME=/tmp/home PATH=/tmp/bin:/usr/bin:/bin sh /src/install.sh
+          test -x /tmp/home/.local/bin/observer_cli
+          SMOKE
       - name: test coverage
         run: |
           epmd -daemon
           rebar3 as test do eunit, covertool generate
       - name: Upload coverage reports to Codecov
         if: matrix.otp == '29'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: zhongwencool/observer_cli
           files: _build/test/covertool/*.covertool.xml
+      - name: Prepare release escript
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          BIN=_build/default/bin/observer_cli
+          printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          sh -n install.sh
+          grep -Fx "VERSION=$VERSION" install.sh
+          "$BIN" --version | tee "$RUNNER_TEMP/observer_cli-version"
+          grep -Fx "observer_cli $VERSION" "$RUNNER_TEMP/observer_cli-version"
+          grep -Fx "controller OTP ${{matrix.otp}}" "$RUNNER_TEMP/observer_cli-version"
+          mkdir -p dist
+          install -m 0755 "$BIN" "dist/observer_cli-$VERSION-otp${{matrix.otp}}"
+      - name: Upload release escript
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: observer_cli-otp${{matrix.otp}}
+          path: dist/observer_cli-*
+          if-no-files-found: error
+
+  mix:
+    runs-on: ubuntu-24.04
+    name: Erlang/OTP 29 / Elixir 1.20 / Mix
+    steps:
+      - uses: actions/checkout@v7
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '29'
+          elixir-version: '1.20'
+          rebar3-version: '3.27'
+      - name: Mix escript and release smoke
+        env:
+          MIX_ENV: prod
+        run: |
+          mix deps.get
+          mix escript.build
+          erl -noshell -eval '{ok,S}=escript:extract("observer_cli",[]),{archive,A}=lists:keyfind(archive,1,S),{ok,E}=zip:table(A),true=lists:keymember("observer_cli/priv/schema/observer_cli.cli.v1.schema.json",2,E),halt().'
+          OBSERVER_CLI_BIN="$PWD/observer_cli" scripts/escript-smoke.sh
+          mix release
+          mix run --no-start -e 'true = :crypto in Application.spec(:observer_cli, :applications)'
+          _build/prod/rel/observer_cli/bin/observer_cli eval ':crypto.strong_rand_bytes(1)'
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, mix]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: observer_cli-otp*
+          path: dist
+          merge-multiple: true
+      - name: Create checksums
+        run: |
+          cd dist
+          VERSION=${GITHUB_REF_NAME#v}
+          sha256sum observer_cli-"$VERSION"-otp{26,27,28,29} > SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 4
+          sha256sum --check SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{github.token}}
+          GH_REPO: ${{github.repository}}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          fi

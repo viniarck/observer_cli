@@ -42,7 +42,10 @@
     node_stats/2,
     get_incremental_stats/1,
     check_auto_row/0,
-    select_home_process/3
+    select_home_process/3,
+    join_home_summary_rows/1,
+    scheduler_usage_rows/1,
+    update_net_ticktime_from/1
 ]).
 
 -endif.
@@ -57,11 +60,11 @@
     "forward/back)"
 ).
 
--spec start() -> no_return() | {badrpc, term()}.
+-spec start() -> no_return() | {badrpc, term()} | {error, connection, connection_failed}.
 start() ->
     start(#view_opts{}).
 
--spec start(Node) -> no_return() | {badrpc, term()} when
+-spec start(Node) -> no_return() | {badrpc, term()} | {error, connection, connection_failed} when
     Node :: atom() | non_neg_integer() | view_opts().
 start(Node) when Node =:= node() ->
     start(#view_opts{});
@@ -72,10 +75,14 @@ start(Opts = #view_opts{home = Home}) ->
     AutoRow = check_auto_row(),
     #home{scheduler_usage = SchUsage} = Home,
     StorePid = observer_cli_store:start(),
-    LastSchWallFlag = set_scheduler_wall_time(true, SchUsage),
-    PsCmd = io_lib:format("ps -o pcpu,pmem ~s", [os:getpid()]),
-    RenderPid = spawn_link(fun() -> render_worker(PsCmd, StorePid, Home, AutoRow) end),
-    manager(StorePid, RenderPid, Opts#view_opts{auto_row = AutoRow}, LastSchWallFlag);
+    SchWallTimeToken = enable_scheduler_wall_time(SchUsage),
+    try
+        PsCmd = io_lib:format("ps -o pcpu,pmem ~s", [os:getpid()]),
+        RenderPid = spawn_link(fun() -> render_worker(PsCmd, StorePid, Home, AutoRow) end),
+        manager(StorePid, RenderPid, Opts#view_opts{auto_row = AutoRow}, SchWallTimeToken)
+    after
+        release_scheduler_wall_time(SchWallTimeToken)
+    end;
 start(Interval) when is_integer(Interval), Interval >= ?MIN_INTERVAL ->
     start(#view_opts{
         home = #home{interval = Interval},
@@ -90,7 +97,9 @@ start(Interval) when is_integer(Interval), Interval >= ?MIN_INTERVAL ->
         port = Interval
     }).
 
--spec start(Node, Cookies | Options) -> no_return() | {badrpc, term()} when
+-spec start(Node, Cookies | Options) ->
+    no_return() | {badrpc, term()} | {error, connection, connection_failed}
+when
     Node :: atom(),
     Cookies :: atom(),
     Options :: proplists:proplist().
@@ -115,9 +124,9 @@ start_plugin() ->
     observer_cli_plugin:start(#view_opts{}).
 
 -spec clean(list()) -> boolean().
-clean([RenderPid, StorePid, SchWallFlag, SchUsage]) ->
+clean([RenderPid, StorePid, SchWallTimeToken, _SchUsage]) ->
     observer_cli_lib:exit_processes([RenderPid, StorePid]),
-    set_scheduler_wall_time(SchWallFlag, SchUsage).
+    release_scheduler_wall_time(SchWallTimeToken).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Private
@@ -126,8 +135,10 @@ clean([RenderPid, StorePid, SchWallFlag, SchUsage]) ->
 rpc_start(Node, Interval) ->
     case net_kernel:hidden_connect_node(Node) of
         true ->
-            update_net_ticktime_from(Node),
-            rpc:call(Node, ?MODULE, start, [Interval]);
+            case update_net_ticktime_from(Node) of
+                ok -> rpc:call(Node, ?MODULE, start, [Interval]);
+                Error -> Error
+            end;
         false ->
             Msg = <<"Node(~p) refuse to be connected, make sure cookie is valid~n">>,
             connect_error(Msg, Node),
@@ -138,43 +149,38 @@ rpc_start(Node, Interval) ->
             {badrpc, nodedown}
     end.
 
-manager(StorePid, RenderPid, Opts, LastSchWallFlag) ->
-    Resource = home_resource(RenderPid, StorePid, LastSchWallFlag, Opts),
+manager(
+    StorePid,
+    RenderPid,
+    Opts = #view_opts{home = #home{scheduler_usage = SchUsage}},
+    SchWallTimeToken
+) ->
+    Resource = [RenderPid, StorePid, SchWallTimeToken, SchUsage],
     Action = observer_cli_lib:parse_cmd(Opts, ?MODULE, Resource),
-    handle_home_action(Action, StorePid, RenderPid, Opts, LastSchWallFlag, Resource).
-
-home_resource(RenderPid, StorePid, LastSchWallFlag, #view_opts{
-    home = #home{scheduler_usage = SchUsage}
-}) ->
-    [RenderPid, StorePid, LastSchWallFlag, SchUsage].
+    handle_home_action(Action, StorePid, RenderPid, Opts, SchWallTimeToken, Resource).
 
 handle_home_action(
     quit,
     StorePid,
     RenderPid,
-    #view_opts{
-        home =
-            #home{
-                scheduler_usage = SchUsage
-            }
-    },
-    LastSchWallFlag,
+    _Opts,
+    SchWallTimeToken,
     _Resource
 ) ->
     erlang:unlink(RenderPid),
     erlang:send(RenderPid, quit),
-    set_scheduler_wall_time(LastSchWallFlag, SchUsage),
+    release_scheduler_wall_time(SchWallTimeToken),
     observer_cli_lib:exit_processes([StorePid]),
     quit;
-handle_home_action(pause_or_resume, StorePid, RenderPid, Opts, LastSchWallFlag, _Resource) ->
+handle_home_action(pause_or_resume, StorePid, RenderPid, Opts, SchWallTimeToken, _Resource) ->
     erlang:send(RenderPid, pause_or_resume),
-    manager(StorePid, RenderPid, Opts, LastSchWallFlag);
+    manager(StorePid, RenderPid, Opts, SchWallTimeToken);
 handle_home_action(
     {new_interval, NewInterval},
     _StorePid,
     _RenderPid,
     Opts = #view_opts{home = Home},
-    _LastSchWallFlag,
+    _SchWallTimeToken,
     Resource
 ) ->
     restart_home(Opts#view_opts{home = Home#home{interval = NewInterval}}, Resource);
@@ -183,7 +189,7 @@ handle_home_action(
     _StorePid,
     _RenderPid,
     Opts = #view_opts{home = Home},
-    _LastSchWallFlag,
+    _SchWallTimeToken,
     Resource
 ) ->
     #home{scheduler_usage = SchUsage} = Home,
@@ -200,31 +206,31 @@ handle_home_action(
                 pages = Pages
             }
     },
-    LastSchWallFlag,
+    SchWallTimeToken,
     Resource
 ) ->
     NewPages = observer_cli_lib:update_page_pos(CurPage, NewPos, Pages),
     NewOpts = Opts#view_opts{home = Home#home{pages = NewPages}},
-    start_process_view(StorePid, RenderPid, NewOpts, LastSchWallFlag, Resource, false);
-handle_home_action(jump, StorePid, RenderPid, Opts, LastSchWallFlag, Resource) ->
-    start_process_view(StorePid, RenderPid, Opts, LastSchWallFlag, Resource, true);
+    start_process_view(StorePid, RenderPid, NewOpts, SchWallTimeToken, Resource, false);
+handle_home_action(jump, StorePid, RenderPid, Opts, SchWallTimeToken, Resource) ->
+    start_process_view(StorePid, RenderPid, Opts, SchWallTimeToken, Resource, true);
 handle_home_action(
     {func, Func, Type},
     _StorePid,
     _RenderPid,
     Opts = #view_opts{home = Home},
-    _LastSchWallFlag,
+    _SchWallTimeToken,
     Resource
 ) ->
     restart_home(Opts#view_opts{home = Home#home{func = Func, type = Type}}, Resource);
-handle_home_action(page_down_top_n, StorePid, _RenderPid, Opts, _LastSchWallFlag, Resource) ->
+handle_home_action(page_down_top_n, StorePid, _RenderPid, Opts, _SchWallTimeToken, Resource) ->
     restart_home_page(1, StorePid, Opts, Resource);
-handle_home_action(page_up_top_n, StorePid, _RenderPid, Opts, _LastSchWallFlag, Resource) ->
+handle_home_action(page_up_top_n, StorePid, _RenderPid, Opts, _SchWallTimeToken, Resource) ->
     restart_home_page(-1, StorePid, Opts, Resource);
-handle_home_action({go_to_pid, Pid}, _StorePid, _RenderPid, Opts, _LastSchWallFlag, Resource) ->
+handle_home_action({go_to_pid, Pid}, _StorePid, _RenderPid, Opts, _SchWallTimeToken, Resource) ->
     open_process_view(Pid, Opts, Resource);
-handle_home_action(_Action, StorePid, RenderPid, Opts, LastSchWallFlag, _Resource) ->
-    manager(StorePid, RenderPid, Opts, LastSchWallFlag).
+handle_home_action(_Action, StorePid, RenderPid, Opts, SchWallTimeToken, _Resource) ->
+    manager(StorePid, RenderPid, Opts, SchWallTimeToken).
 
 toggle_scheduler_usage(SchUsage) ->
     case SchUsage of
@@ -948,8 +954,13 @@ top_n_row_values(message_queue_len, Pid, MQLen) ->
         observer_cli_lib:to_byte(Memory),
         observer_cli_lib:to_list(Reductions)
     };
-top_n_row_values(_Type, Pid, Bytes) ->
+top_n_row_values(Type, Pid, Value) ->
     {Reductions, MsgQueueLen} = get_pid_info(Pid, [reductions, message_queue_len]),
+    Bytes =
+        case Type of
+            total_heap_size -> Value * erlang:system_info(wordsize);
+            _ -> Value
+        end,
     {
         observer_cli_lib:to_byte(Bytes),
         observer_cli_lib:to_list(Reductions),
@@ -1198,7 +1209,7 @@ start_process_view(
     StorePid,
     RenderPid,
     Opts,
-    LastSchWallFlag,
+    SchWallTimeToken,
     Resource,
     AutoJump
 ) ->
@@ -1206,7 +1217,7 @@ start_process_view(
         {ok, ChoosePid} ->
             open_process_view(ChoosePid, Opts, Resource);
         error ->
-            manager(StorePid, RenderPid, Opts, LastSchWallFlag)
+            manager(StorePid, RenderPid, Opts, SchWallTimeToken)
     end.
 
 select_home_process(StorePid, #view_opts{home = Home}, AutoJump) ->
@@ -1229,10 +1240,20 @@ open_process_view(Pid, Opts, Resource) ->
     clean(Resource),
     observer_cli_process:start(home, Pid, Opts).
 
-set_scheduler_wall_time(_Flag, ?DISABLE) ->
+enable_scheduler_wall_time(?DISABLE) ->
     false;
-set_scheduler_wall_time(Flag, ?ENABLE) ->
-    erlang:system_flag(scheduler_wall_time, Flag).
+enable_scheduler_wall_time(?ENABLE) ->
+    Token = atomics:new(1, []),
+    _ = erlang:system_flag(scheduler_wall_time, true),
+    Token.
+
+release_scheduler_wall_time(false) ->
+    false;
+release_scheduler_wall_time(Token) ->
+    case atomics:exchange(Token, 1, 1) of
+        0 -> erlang:system_flag(scheduler_wall_time, false);
+        1 -> false
+    end.
 
 check_auto_row() ->
     case io:rows() of
@@ -1278,12 +1299,18 @@ get_incremental_stats(SchUsage) ->
     {In, Out, GCs, Words, ScheduleWall}.
 
 update_net_ticktime_from(Node) ->
-    NetTickTime = rpc:call(Node, net_kernel, get_net_ticktime, []),
-    accept_net_ticktime_result(net_kernel:set_net_ticktime(NetTickTime), NetTickTime).
+    case rpc:call(Node, net_kernel, get_net_ticktime, []) of
+        NetTickTime when is_integer(NetTickTime), NetTickTime > 0 ->
+            accept_net_ticktime_result(net_kernel:set_net_ticktime(NetTickTime), NetTickTime);
+        _Invalid ->
+            {error, connection, connection_failed}
+    end.
 
 accept_net_ticktime_result(change_initiated, _NetTickTime) ->
     ok;
 accept_net_ticktime_result({ongoing_change_to, NetTickTime}, NetTickTime) ->
     ok;
+accept_net_ticktime_result({ongoing_change_to, _Other}, _NetTickTime) ->
+    {error, connection, connection_failed};
 accept_net_ticktime_result(unchanged, _NetTickTime) ->
     ok.

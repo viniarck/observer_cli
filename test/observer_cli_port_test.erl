@@ -5,6 +5,61 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("observer_cli.hrl").
 
+diagnostic_ports_use_explicit_keys_and_raw_identity_test() ->
+    PortA = open_port({spawn, "cat"}, []),
+    PortB = open_port({spawn, "cat"}, []),
+    Parent = self(),
+    Info = fun(Port, Key) ->
+        Parent ! {port_info_key, Port, Key},
+        diagnostic_port_field(Key)
+    end,
+    Source = #{
+        count_fun => fun() -> 2 end,
+        all_fun => fun() -> {ok, [PortA, PortB]} end,
+        info_fun => Info
+    },
+    try
+        Data = diagnostic_port_data(#{sort => io, limit => 2, test_port_source => Source}),
+        Items = maps:get(<<"items">>, Data),
+        ?assertEqual(2, length(Items)),
+        ?assertEqual([12, 12], [maps:get(<<"io">>, Item) || Item <- Items]),
+        ?assertEqual(1, length(lists:usort([maps:get(<<"display_id">>, Item) || Item <- Items]))),
+        Calls = collect_port_info_calls(18, []),
+        ?assertEqual(
+            [connected, id, input, locking, memory, name, output, parallelism, queue_size],
+            lists:usort([Key || {_Port, Key} <- Calls])
+        )
+    after
+        port_close(PortA),
+        port_close(PortB)
+    end.
+
+diagnostic_port_field(name) -> {ok, "efile"};
+diagnostic_port_field(connected) -> {ok, self()};
+diagnostic_port_field(queue_size) -> {ok, 3};
+diagnostic_port_field(memory) -> {ok, 4};
+diagnostic_port_field(id) -> {ok, 7};
+diagnostic_port_field(input) -> {ok, 5};
+diagnostic_port_field(output) -> {ok, 7};
+diagnostic_port_field(parallelism) -> missing;
+diagnostic_port_field(locking) -> missing.
+
+collect_port_info_calls(0, Acc) ->
+    Acc;
+collect_port_info_calls(Count, Acc) ->
+    receive
+        {port_info_key, Port, Key} -> collect_port_info_calls(Count - 1, [{Port, Key} | Acc])
+    after 1000 ->
+        error({missing_port_info_calls, Count})
+    end.
+
+diagnostic_port_data(Request) ->
+    #{<<"status">> := <<"ok">>, <<"result">> := #{<<"data">> := Data}} =
+        observer_cli_snapshot:dispatch(
+            self(), ports, Request, #{timeout_ms => 5000, identifier_policy => include}
+        ),
+    Data.
+
 start_quit_test() ->
     {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}]),
     try
@@ -25,6 +80,15 @@ start_ports_quit_test() ->
 start_ports_sort_and_page_test() ->
     observer_cli_test_io:with_input(
         ["m\n", "qs\n", "pd\n", "pu\n", "q\n"],
+        fun() ->
+            Opts = #view_opts{auto_row = false},
+            ?assertEqual(quit, observer_cli_port:start(Opts))
+        end
+    ).
+
+start_ports_restarts_and_ignores_invalid_selection_test() ->
+    observer_cli_test_io:with_input(
+        ["1500\n", "x\n", "999\n", "q\n"],
         fun() ->
             Opts = #view_opts{auto_row = false},
             ?assertEqual(quit, observer_cli_port:start(Opts))
@@ -217,6 +281,57 @@ collect_ports_info_test() ->
         port_close(Port)
     end.
 
+port_runtime_helper_contract_test() ->
+    ?assertNot(observer_cli_port:keep_port(dead)),
+    ?assertNot(observer_cli_port:keep_port({0, 0, #{controls => "tcp_inet", name => "name"}})),
+    ?assert(observer_cli_port:keep_port({0, 0, #{controls => "efile", name => "efile"}})),
+    ?assertEqual(2, observer_cli_port:sort_value(memory, #{memory => 2})),
+    ?assertEqual(0, observer_cli_port:sort_value(memory, #{memory => invalid})),
+    ?assertEqual("controls", observer_cli_port:port_controls(invalid, [{controls, "controls"}])),
+    ?assertEqual("name", observer_cli_port:port_controls(invalid, [{name, "name"}])),
+    ?assertEqual("2", observer_cli_port:monitor_count([one, two])),
+    ?assertEqual("0", observer_cli_port:monitor_count(invalid)),
+    ?assert(is_list(observer_cli_port:monitor_to_list({process, self()}))),
+    ?assert(is_list(observer_cli_port:monitor_to_list({registered, node()}))),
+    ?assert(is_list(observer_cli_port:monitor_to_list(self()))),
+    ?assert(is_list(observer_cli_port:monitor_to_list(other))),
+    ?assertEqual([], observer_cli_port:render_option_rows([], [10, 10, 10, 10, 10, 10, 10, 10])),
+    ?assertNotEqual(
+        [],
+        observer_cli_port:render_option_rows(
+            [{active, false}], [10, 10, 10, 10, 10, 10, 10, 10]
+        )
+    ),
+    Port = open_port({spawn, "cat"}, [binary]),
+    try
+        ?assertMatch({0, _, #{port := Port}}, observer_cli_port:port_overview(Port, memory))
+    after
+        port_close(Port)
+    end,
+    ?assertEqual(dead, observer_cli_port:port_overview(Port, memory)),
+    {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}]),
+    try
+        ?assert(is_list(observer_cli_port:collect_sock_opts(Listen)))
+    after
+        gen_tcp:close(Listen)
+    end,
+    ?assert(is_list(observer_cli_port:collect_sock_opts(invalid_port))),
+    ?assertEqual(
+        {active, true},
+        observer_cli_port:collect_sock_opt_result(
+            active, {ok, [{active, true}]}
+        )
+    ),
+    ?assertEqual({active, "-"}, observer_cli_port:collect_sock_opt_result(active, {ok, []})),
+    ?assertEqual(
+        {active, "Not Supported"},
+        observer_cli_port:collect_sock_opt_result(active, {error, einval})
+    ),
+    ?assertMatch(
+        {active, [$e, $r, $r, $o, $r, $: | _]},
+        observer_cli_port:collect_sock_opt_result(active, {error, failed})
+    ).
+
 select_port_test() ->
     Port0 = open_port({spawn, "cat"}, [binary]),
     try
@@ -243,7 +358,9 @@ render_ports_info_test() ->
         monitored_by => [self()]
     },
     Rows = observer_cli_port:render_ports_info({1, [{0, 0, PortInfo}]}, queue_size),
+    MemoryRows = observer_cli_port:render_ports_info({1, [{0, 0, PortInfo}]}, memory),
     Text = lists:flatten(Rows),
+    ?assert(string:find(lists:flatten(MemoryRows), "Memory") =/= nomatch),
     ?assert(string:find(Text, "Controls") =/= nomatch),
     ?assert(string:find(Text, "Mon/By") =/= nomatch).
 
