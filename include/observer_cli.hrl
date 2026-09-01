@@ -75,7 +75,8 @@
     process = #process{} :: #process{},
     port = ?DEFAULT_INTERVAL :: pos_integer(),
     plug = #plug{} :: #plug{},
-    auto_row = true :: boolean()
+    auto_row = true :: boolean(),
+    ps_cmd = undefined :: undefined | no_ps | iodata()
 }).
 
 -export_type([

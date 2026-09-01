@@ -2,6 +2,11 @@
 
 Release and maintenance changes, newest first.
 
+## Fork
+
+- Use `/proc` with file_read for `beam.smp` instead to work on targets where `ps -o pcpu/pmem` isn't available. Also, optimized away io_lib calls with the fallback
+- Changed `beam.smp` to display overall CPU delta rate instead instead of `pcpu`
+
 ## 2.0.0 (release candidate)
 
 - Added `mix escript.build` as an alternative source build for the controller,
