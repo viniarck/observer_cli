@@ -83,7 +83,7 @@ collect_home_snapshot_test() ->
             lists:flatten(maps:get(refresh_prompt, Snapshot))
         )
     ),
-    ?assertMatch({_, _, _, _, _}, NewStats).
+    ?assertMatch({_, _, _, _, _, _}, NewStats).
 
 get_current_initial_call_test() ->
     Call = [
@@ -111,6 +111,79 @@ render_system_line_missing_output_test() ->
     StableInfo = observer_cli:get_stable_system_info(),
     Line = observer_cli:render_system_line(PsCmd, StableInfo),
     ?assert(string:find(lists:flatten(Line), "ps -o pcpu") =/= nomatch).
+
+render_system_line_proc_fallback_test() ->
+    PsCmd = "printf ''",
+    StableInfo = observer_cli:get_stable_system_info(),
+    %% No cpu percent supplied: cpu% renders as "--" (e.g. first render tick).
+    LineNoSample = lists:flatten(
+        observer_cli:render_system_line(PsCmd, StableInfo, observer_cli:get_atom_status(), "--")
+    ),
+    ?assert(string:find(LineNoSample, "--%") =/= nomatch),
+    %% A real cpu percent string renders through unchanged.
+    LineWithPercent = lists:flatten(
+        observer_cli:render_system_line(PsCmd, StableInfo, observer_cli:get_atom_status(), "42.0")
+    ),
+    ?assert(string:find(LineWithPercent, "42.0%") =/= nomatch),
+    case os:type() of
+        {unix, linux} ->
+            ?assertNotEqual("--", observer_cli_lib:proc_mem_percent());
+        _ ->
+            ok
+    end.
+
+%% node_stats/2 must gate the cpu percent to real elapsed time: a render
+%% mode that redraws far faster than the display interval (e.g. Home's
+%% proc_window ranking) must not recompute cpu% over a too-short window,
+%% since /proc/self/stat's 10ms tick quantization would dominate the
+%% result rather than reflecting real usage.
+%% Home redraws every 10ms in proc_window ranking mode, so a ps that can
+%% never work must be resolved to no_ps once rather than forked per render.
+resolve_ps_cmd_test() ->
+    BusyBoxLike =
+        "printf \"ps: invalid option -- 'o'\\n"
+        "BusyBox v1.37.0 (Ubuntu 1:1.37.0) multi-call binary.\\n\"",
+    ?assertEqual(no_ps, observer_cli:resolve_ps_cmd(BusyBoxLike)),
+    ?assertEqual(no_ps, observer_cli:resolve_ps_cmd("printf ''")),
+    Working = "printf 'header\\n 1.5 0.3\\n'",
+    ?assertEqual(Working, observer_cli:resolve_ps_cmd(Working)).
+
+%% With no_ps the summary renders the /proc-derived percent it was handed,
+%% without touching os:cmd/1.
+render_system_line_no_ps_test() ->
+    StableInfo = observer_cli:get_stable_system_info(),
+    Line = lists:flatten(
+        observer_cli:render_system_line(no_ps, StableInfo, observer_cli:get_atom_status(), "42.0")
+    ),
+    ?assert(string:find(Line, "42.0%") =/= nomatch),
+    %% A working ps still wins over the fallback value.
+    Working = "printf 'header\\n 1.5 0.3\\n'",
+    WorkingLine = lists:flatten(
+        observer_cli:render_system_line(Working, StableInfo, observer_cli:get_atom_status(), "42.0")
+    ),
+    ?assert(string:find(WorkingLine, "1.5%") =/= nomatch),
+    ?assert(string:find(WorkingLine, "42.0%") =:= nomatch).
+
+node_stats_cpu_gauge_rate_limited_test() ->
+    case os:type() of
+        {unix, linux} ->
+            Stats0 = observer_cli:get_incremental_stats(?DISABLE),
+            %% The first sample has nothing to diff against yet.
+            ?assertEqual("--", observer_cli:cpu_percent_from_stats(Stats0)),
+            %% Past ?MIN_INTERVAL the gauge derives a real percent.
+            timer:sleep(?MIN_INTERVAL + 100),
+            {_, _, Stats1} = observer_cli:node_stats(Stats0, ?DISABLE),
+            Percent1 = observer_cli:cpu_percent_from_stats(Stats1),
+            ?assertNotEqual("--", Percent1),
+            ?assertMatch({_Float, []}, string:to_float(Percent1)),
+            %% Immediately re-derive stats without a real elapsed window: the
+            %% gauge must hold that percent rather than recompute it over a
+            %% window dominated by /proc/self/stat's 10ms tick quantization.
+            {_, _, Stats2} = observer_cli:node_stats(Stats1, ?DISABLE),
+            ?assertEqual(Percent1, observer_cli:cpu_percent_from_stats(Stats2));
+        _ ->
+            ok
+    end.
 
 accept_net_ticktime_result_test() ->
     ?assertEqual(ok, observer_cli:accept_net_ticktime_result(change_initiated, 60)),

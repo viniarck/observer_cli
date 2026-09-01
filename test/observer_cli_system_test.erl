@@ -128,9 +128,8 @@ render_sys_info_wide_layout_test() ->
     ?assert(lists:nth(2, WideCompile) > lists:nth(2, BaseCompile)).
 
 render_sys_info_empty_ps_test() ->
-    Line = observer_cli_system:render_sys_info(
-        observer_cli_system:collect_sys_info("printf 'header\\n'")
-    ),
+    {SysInfo, _} = observer_cli_system:collect_sys_info("printf 'header\\n'", undefined),
+    Line = observer_cli_system:render_sys_info(SysInfo),
     ?assert(string:find(lists:flatten(Line), "System/Architecture") =/= nomatch).
 
 render_sys_info_runtime_limits_test() ->
@@ -139,9 +138,10 @@ render_sys_info_runtime_limits_test() ->
         201,
         [],
         fun() ->
-            Line = observer_cli_system:render_sys_info(
-                observer_cli_system:collect_sys_info("printf 'header\\n 1 2 3 4\\n'")
+            {SysInfo, _} = observer_cli_system:collect_sys_info(
+                "printf 'header\\n 1 2 3 4\\n'", undefined
             ),
+            Line = observer_cli_system:render_sys_info(SysInfo),
             Output = lists:flatten(Line),
             ?assert(string:find(Output, "System Statistics / Limit") =/= nomatch),
             ?assert(string:find(Output, "Distribution buffer busy limit") =/= nomatch),
@@ -157,19 +157,170 @@ render_sys_info_runtime_limits_test() ->
 
 collect_sys_info_test() ->
     Cmd = "printf 'header\\n 1 2 3 4\\n'",
-    OsProcessInfo = observer_cli_system:collect_os_process_info(Cmd),
+    {OsProcessInfo, CpuGauge} = observer_cli_system:collect_os_process_info(Cmd, undefined),
     ?assertEqual("1%", proplists:get_value(ps_cpu, OsProcessInfo)),
     ?assertEqual("2%", proplists:get_value(ps_mem, OsProcessInfo)),
     ?assertEqual(3 * 1024, proplists:get_value(ps_rss, OsProcessInfo)),
     ?assertEqual(4 * 1024, proplists:get_value(ps_vsz, OsProcessInfo)),
-    Info = observer_cli_system:collect_sys_info(Cmd),
+    %% ps -o succeeded, so the cpu gauge passes through unchanged.
+    ?assertEqual(undefined, CpuGauge),
+    {Info, _} = observer_cli_system:collect_sys_info(Cmd, undefined),
     ?assertEqual("1%", proplists:get_value(ps_cpu, Info)),
     ?assertEqual("2%", proplists:get_value(ps_mem, Info)),
     ?assertEqual(3 * 1024, proplists:get_value(ps_rss, Info)),
     ?assertEqual(4 * 1024, proplists:get_value(ps_vsz, Info)).
 
+collect_os_process_info_proc_status_fallback_test() ->
+    NoPs = "printf 'header\\n'",
+    {OsProcessInfo, CpuGauge} = observer_cli_system:collect_os_process_info(NoPs, undefined),
+    %% First call: no reference sample yet, so cpu% cannot be derived.
+    ?assertEqual("--%", proplists:get_value(ps_cpu, OsProcessInfo)),
+    case os:type() of
+        {unix, linux} ->
+            ?assert(is_integer(proplists:get_value(ps_rss, OsProcessInfo))),
+            ?assert(is_integer(proplists:get_value(ps_vsz, OsProcessInfo))),
+            ?assertNotEqual("--%", proplists:get_value(ps_mem, OsProcessInfo)),
+            ?assertNotEqual(undefined, CpuGauge),
+            %% An immediate second call -- what {new_interval, _} triggers by
+            %% redrawing without waiting for the pending timer -- must hold the
+            %% last percent rather than divide over the partial window.
+            {OsProcessInfo2, CpuGauge2} = observer_cli_system:collect_os_process_info(
+                NoPs, CpuGauge
+            ),
+            ?assertEqual("--%", proplists:get_value(ps_cpu, OsProcessInfo2)),
+            ?assertEqual(CpuGauge, CpuGauge2),
+            %% Once a full interval has elapsed the percent is derived. Age the
+            %% reference sample instead of sleeping through ?MIN_INTERVAL.
+            {{RefTicks, RefMs}, LastPercent} = CpuGauge,
+            AgedGauge = {{RefTicks, RefMs - ?MIN_INTERVAL - 1}, LastPercent},
+            {OsProcessInfo3, _} = observer_cli_system:collect_os_process_info(NoPs, AgedGauge),
+            ?assertNotEqual("--%", proplists:get_value(ps_cpu, OsProcessInfo3));
+        _ ->
+            ?assertEqual("--", proplists:get_value(ps_rss, OsProcessInfo)),
+            ?assertEqual("--", proplists:get_value(ps_vsz, OsProcessInfo)),
+            ?assertEqual("--%", proplists:get_value(ps_mem, OsProcessInfo))
+    end.
+
+%% os:cmd/1 captures stderr, so a ps without -o support hands us its usage
+%% message instead of no output. BusyBox prints "invalid option -- 'o'"
+%% followed by its version banner; that banner splits into four fields on
+%% builds with no distro suffix, which used to reach the ps happy path and
+%% crash in list_to_integer/1. Every shape must degrade to the /proc fallback.
+collect_os_process_info_busybox_usage_test() ->
+    BusyBoxOutputs = [
+        %% BusyBox built without -o support, plain version banner.
+        "printf \"ps: invalid option -- 'o'\\nBusyBox v1.36.1 multi-call binary.\\n\"",
+        %% Same, with a distro suffix in the banner.
+        "printf \"ps: invalid option -- 'o'\\nBusyBox v1.37.0 (Ubuntu 1:1.37.0-7ubuntu1) "
+        "multi-call binary.\\n\"",
+        %% BusyBox that accepts -o but rejects the columns (single line).
+        "printf \"ps: bad -o argument 'pcpu', supported arguments: pid,vsz,rss\\n\"",
+        %% ps missing entirely: no output on either stream.
+        "printf ''",
+        %% Output with no trailing newline at all.
+        "printf 'ps: not found'"
+    ],
+    lists:foreach(
+        fun(Cmd) ->
+            {OsProcessInfo, _} = observer_cli_system:collect_os_process_info(Cmd, undefined),
+            ?assertEqual(
+                [ps_cpu, ps_mem, ps_rss, ps_vsz],
+                lists:sort([Key || {Key, _} <- OsProcessInfo])
+            ),
+            %% Never a value parsed out of the usage text.
+            ?assertNotEqual("v1.36.1%", proplists:get_value(ps_mem, OsProcessInfo)),
+            case os:type() of
+                {unix, linux} ->
+                    ?assert(is_integer(proplists:get_value(ps_rss, OsProcessInfo))),
+                    ?assert(is_integer(proplists:get_value(ps_vsz, OsProcessInfo)));
+                _ ->
+                    ?assertEqual("--", proplists:get_value(ps_rss, OsProcessInfo))
+            end
+        end,
+        BusyBoxOutputs
+    ).
+
+%% A ps line whose rss/vsz columns are not plain integers is not ps data.
+collect_os_process_info_non_numeric_columns_test() ->
+    {OsProcessInfo, _} = observer_cli_system:collect_os_process_info(
+        "printf 'header\\n 0.0 0.1 12k 34k\\n'", undefined
+    ),
+    ?assertEqual("--%", proplists:get_value(ps_cpu, OsProcessInfo)).
+
+%% The render loop must not fork a shell every interval on a target where
+%% ps -o can never work. Probe once, then go straight to /proc.
+resolve_ps_cmd_probes_once_test() ->
+    case os:type() of
+        {unix, _} ->
+            Marker = ps_fork_marker(),
+            file:delete(Marker),
+            %% A fake ps that records every invocation and fails like BusyBox.
+            BusyBoxLike =
+                "printf x >> " ++ Marker ++
+                    "; printf \"ps: invalid option -- 'o'\\n"
+                    "BusyBox v1.37.0 multi-call binary.\\n\"",
+            ?assertEqual(no_ps, observer_cli_system:resolve_ps_cmd(BusyBoxLike)),
+            ?assertEqual(1, ps_fork_count(Marker)),
+            %% 20 further renders must not invoke the command again.
+            lists:foldl(
+                fun(_, Gauge) ->
+                    {Info, NewGauge} = observer_cli_system:collect_os_process_info(no_ps, Gauge),
+                    ?assertNotEqual(undefined, proplists:get_value(ps_cpu, Info)),
+                    NewGauge
+                end,
+                undefined,
+                lists:seq(1, 20)
+            ),
+            ?assertEqual(1, ps_fork_count(Marker)),
+            file:delete(Marker);
+        _ ->
+            ok
+    end.
+
+%% ...but a ps that does work stays the data source and is re-read each render,
+%% otherwise the view would freeze on the probe's values.
+resolve_ps_cmd_keeps_working_ps_test() ->
+    case os:type() of
+        {unix, _} ->
+            Marker = ps_fork_marker(),
+            file:delete(Marker),
+            Working =
+                "printf x >> " ++ Marker ++ "; printf 'header\\n 1.5 0.3 12345 67890\\n'",
+            ?assertEqual(Working, observer_cli_system:resolve_ps_cmd(Working)),
+            ?assertEqual(1, ps_fork_count(Marker)),
+            {Info, _} = observer_cli_system:collect_os_process_info(Working, undefined),
+            ?assertEqual("1.5%", proplists:get_value(ps_cpu, Info)),
+            ?assertEqual(12345 * 1024, proplists:get_value(ps_rss, Info)),
+            ?assertEqual(2, ps_fork_count(Marker)),
+            file:delete(Marker);
+        _ ->
+            ok
+    end.
+
+%% Columns that are not plain integers mean this is not ps output at all.
+resolve_ps_cmd_rejects_non_numeric_columns_test() ->
+    NonNumeric = "printf 'header\\n 0.0 0.1 12k 34k\\n'",
+    ?assertEqual(no_ps, observer_cli_system:resolve_ps_cmd(NonNumeric)),
+    ?assertEqual(no_ps, observer_cli_system:resolve_ps_cmd("printf ''")).
+
+ps_fork_marker() ->
+    Dir =
+        case os:getenv("TMPDIR") of
+            false -> "/tmp";
+            Value -> Value
+        end,
+    filename:join(Dir, "observer_cli_ps_fork_probe_test").
+
+ps_fork_count(Marker) ->
+    case file:read_file(Marker) of
+        {ok, Bin} -> byte_size(Bin);
+        {error, _} -> 0
+    end.
+
 collect_system_info_test() ->
-    Info = observer_cli_system:collect_system_info("printf 'header\\n 1 2 3 4\\n'"),
+    {Info, _NewCpuGauge} = observer_cli_system:collect_system_info(
+        "printf 'header\\n 1 2 3 4\\n'", undefined
+    ),
     ?assertEqual(
         lists:sort([allocator_info, dist_nodes_info, os_process_info, sys_info]),
         lists:sort(maps:keys(Info))
@@ -228,7 +379,9 @@ collect_system_info_test() ->
     ].
 
 render_system_sections_test() ->
-    FullSysInfo = observer_cli_system:collect_sys_info("printf 'header\\n 1 2 3 4\\n'"),
+    {FullSysInfo, _} = observer_cli_system:collect_sys_info(
+        "printf 'header\\n 1 2 3 4\\n'", undefined
+    ),
     {OsProcessInfo, SysInfo} = split_os_process_info(FullSysInfo),
     [Sys, Allocator, DistNodes, CacheHit] = observer_cli_system:render_system_sections(#{
         os_process_info => OsProcessInfo,
@@ -430,7 +583,7 @@ render_dist_node_info_wide_layout_test() ->
 
 render_worker_redraw_test() ->
     Cmd = "printf 'header\\n 1 2 3 4\\n'",
-    Pid = spawn(fun() -> observer_cli_system:render_worker(Cmd, 1, ?INIT_TIME_REF) end),
+    Pid = spawn(fun() -> observer_cli_system:render_worker(Cmd, 1, ?INIT_TIME_REF, undefined) end),
     Ref = erlang:monitor(process, Pid),
     Pid ! redraw,
     Pid ! {new_interval, 2},
@@ -448,7 +601,7 @@ render_worker_empty_sys_dist_test() ->
             try
                 Cmd = "printf 'header\\n 1 2 3 4\\n'",
                 Pid = spawn(fun() ->
-                    observer_cli_system:render_worker(Cmd, 1, ?INIT_TIME_REF)
+                    observer_cli_system:render_worker(Cmd, 1, ?INIT_TIME_REF, undefined)
                 end),
                 Ref = erlang:monitor(process, Pid),
                 Pid ! quit,

@@ -19,7 +19,7 @@
 -ifdef(TEST).
 
 -export([
-    render_system_line/2, render_system_line/3,
+    render_system_line/2, render_system_line/3, render_system_line/4,
     render_memory_process_line/2,
     render_scheduler_usage/1,
     render_footer/0,
@@ -41,6 +41,8 @@
     collect_home_snapshot/6,
     node_stats/2,
     get_incremental_stats/1,
+    cpu_percent_from_stats/1,
+    resolve_ps_cmd/1,
     check_auto_row/0,
     select_home_process/3,
     join_home_summary_rows/1,
@@ -77,7 +79,7 @@ start(Opts = #view_opts{home = Home}) ->
     StorePid = observer_cli_store:start(),
     SchWallTimeToken = enable_scheduler_wall_time(SchUsage),
     try
-        PsCmd = io_lib:format("ps -o pcpu,pmem ~s", [os:getpid()]),
+        PsCmd = resolve_ps_cmd(io_lib:format("ps -o pcpu,pmem ~s", [os:getpid()])),
         RenderPid = spawn_link(fun() -> render_worker(PsCmd, StorePid, Home, AutoRow) end),
         manager(StorePid, RenderPid, Opts#view_opts{auto_row = AutoRow}, SchWallTimeToken)
     after
@@ -328,12 +330,13 @@ collect_home_snapshot(PsCmd, Home, StableInfo, LastStats, TerminalRows, IsFirstT
         TerminalRows - 14 - scheduler_usage_rows(SchedulerUsage), 0
     ),
     ProcessRanking = collect_home_processes(Home, ProcessRows, IsFirstTime),
-    Runtime = sample_home_runtime(PsCmd, StableInfo, Diffs, SchedulerUsage, Interval),
+    CpuPercent = cpu_percent_from_stats(NewStats),
+    Runtime = sample_home_runtime(PsCmd, StableInfo, CpuPercent, Diffs, SchedulerUsage, Interval),
     {maps:merge(Runtime#{process_rows => ProcessRows}, ProcessRanking), NewStats}.
 
-sample_home_runtime(PsCmd, StableInfo, Diffs, SchedulerUsage, Interval) ->
+sample_home_runtime(PsCmd, StableInfo, CpuPercent, Diffs, SchedulerUsage, Interval) ->
     #{
-        system_summary => system_summary(PsCmd, StableInfo, get_atom_status()),
+        system_summary => system_summary(PsCmd, StableInfo, get_atom_status(), CpuPercent),
         memory_summary => memory_process_summary(Diffs, Interval),
         scheduler_usage => SchedulerUsage
     }.
@@ -382,11 +385,14 @@ render_system_line(PsCmd, StableInfo) ->
     render_system_line(PsCmd, StableInfo, get_atom_status()).
 
 render_system_line(PsCmd, StableInfo, AtomStatus) ->
-    render_home_summary(system_summary(PsCmd, StableInfo, AtomStatus)).
+    render_system_line(PsCmd, StableInfo, AtomStatus, "--").
+
+render_system_line(PsCmd, StableInfo, AtomStatus, CpuPercent) ->
+    render_home_summary(system_summary(PsCmd, StableInfo, AtomStatus, CpuPercent)).
 
 -endif.
 
-system_summary(PsCmd, StableInfo, AtomStatus) ->
+system_summary(PsCmd, StableInfo, AtomStatus, CpuPercent) ->
     {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra, RightLabelExtra,
         RightValueExtra} = home_summary_extras(),
     [Version, SysVersion, ProcLimit, PortLimit, EtsLimit] = StableInfo,
@@ -395,24 +401,12 @@ system_summary(PsCmd, StableInfo, AtomStatus) ->
     Reductions = erlang:statistics(reductions),
     {PortWarning, ProcWarning, PortCount, ProcCount} =
         get_port_proc_info(PortLimit, ProcLimit),
-    CmdValue =
-        case
-            string:split(
-                os:cmd(PsCmd), "\n", all
-            )
-        of
-            [_, CmdValueTmp | _] ->
-                CmdValueTmp;
-            _ ->
-                ""
-        end,
-
     [CpuPsV, MemPsV] =
-        case lists:filter(fun(Y) -> Y =/= [] end, string:split(CmdValue, " ", all)) of
-            [V1, V2] ->
-                [V1, V2];
-            _ ->
-                ["--", "--"]
+        case ps_cpu_mem(PsCmd) of
+            {ok, CpuPsValue, MemPsValue} ->
+                [CpuPsValue, MemPsValue];
+            error ->
+                [CpuPercent, observer_cli_lib:proc_mem_percent()]
         end,
     {Reds, AddReds} = Reductions,
     ReductionsText = [integer_to_list(Reds), "/", integer_to_list(AddReds)],
@@ -616,6 +610,22 @@ render_home_summary_cell({Value, Width}) ->
     ?W(Value, Width);
 render_home_summary_cell({Color, Value, Width}) ->
     ?W2(Color, Value, Width).
+
+%% no_ps means ps -o was probed once at view start and cannot produce these
+%% columns on this host (BusyBox without -o support).
+ps_cpu_mem(no_ps) ->
+    error;
+ps_cpu_mem(PsCmd) ->
+    case observer_cli_lib:ps_output_fields(os:cmd(PsCmd)) of
+        [CpuPsV, MemPsV] -> {ok, CpuPsV, MemPsV};
+        _ -> error
+    end.
+
+resolve_ps_cmd(Cmd) ->
+    case ps_cpu_mem(Cmd) of
+        {ok, _Cpu, _Mem} -> Cmd;
+        error -> no_ps
+    end.
 
 home_summary_extras() ->
     Extra = observer_cli_lib:layout_extra_width(observer_cli_lib:layout_base_width() + 1),
@@ -1264,14 +1274,14 @@ check_auto_row() ->
     end.
 
 node_stats(LastStats, SchUsage) ->
-    New = get_incremental_stats(SchUsage),
+    New = get_incremental_stats(SchUsage, cpu_gauge(LastStats)),
     {
         io_gc_stats_diff(LastStats, New),
         scheduler_usage_diff(LastStats, New),
         New
     }.
 
-io_gc_stats_diff({LastIn, LastOut, LastGCs, LastWords, _}, {In, Out, GCs, Words, _}) ->
+io_gc_stats_diff({LastIn, LastOut, LastGCs, LastWords, _, _}, {In, Out, GCs, Words, _, _}) ->
     BytesInDiff = In - LastIn,
     BytesOutDiff = Out - LastOut,
     GCCountDiff = GCs - LastGCs,
@@ -1283,10 +1293,24 @@ io_gc_stats_diff({LastIn, LastOut, LastGCs, LastWords, _}, {In, Out, GCs, Words,
         [integer_to_list(Words), "/", integer_to_list(GCWordsDiff)]
     }.
 
-scheduler_usage_diff({_, _, _, _, LastScheduleWall}, {_, _, _, _, ScheduleWall}) ->
+scheduler_usage_diff({_, _, _, _, LastScheduleWall, _}, {_, _, _, _, ScheduleWall, _}) ->
     recon_lib:scheduler_usage_diff(LastScheduleWall, ScheduleWall).
 
+%% CpuGauge (6th field) is {ReferenceSample, LastPercentString}, updated
+%% via observer_cli_lib:cpu_percent_gauge/2. It is rate-limited to
+%% ?MIN_INTERVAL internally, which matters because some render modes
+%% (proc_window) redraw far faster than the configured display interval
+cpu_gauge(Stats) ->
+    element(6, Stats).
+
+cpu_percent_from_stats(Stats) ->
+    {_RefSample, Percent} = cpu_gauge(Stats),
+    Percent.
+
 get_incremental_stats(SchUsage) ->
+    get_incremental_stats(SchUsage, undefined).
+
+get_incremental_stats(SchUsage, PrevCpuGauge) ->
     {{input, In}, {output, Out}} = erlang:statistics(io),
     {GCs, Words, _} = erlang:statistics(garbage_collection),
     ScheduleWall =
@@ -1296,7 +1320,9 @@ get_incremental_stats(SchUsage) ->
             ?DISABLE ->
                 undefined
         end,
-    {In, Out, GCs, Words, ScheduleWall}.
+    CurCpuSample = observer_cli_lib:cpu_time_sample(),
+    {NewCpuGauge, _Percent} = observer_cli_lib:cpu_percent_gauge(PrevCpuGauge, CurCpuSample),
+    {In, Out, GCs, Words, ScheduleWall, NewCpuGauge}.
 
 update_net_ticktime_from(Node) ->
     case rpc:call(Node, net_kernel, get_net_ticktime, []) of
