@@ -263,7 +263,7 @@ restart_home_page(Delta, StorePid, Opts = #view_opts{home = Home}, Resource) ->
 %% Probed once per host; the verdict rides in #view_opts{} because Home
 %% re-enters start/1 constantly and must not fork a shell each time.
 home_ps_cmd(#view_opts{ps_cmd = undefined}) ->
-    resolve_ps_cmd(io_lib:format("ps -o pcpu,pmem ~s", [os:getpid()]));
+    resolve_ps_cmd(io_lib:format("ps -o pcpu,pmem ~s 2>/dev/null", [os:getpid()]));
 home_ps_cmd(#view_opts{ps_cmd = PsCmd}) ->
     PsCmd.
 

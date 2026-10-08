@@ -69,7 +69,7 @@ start(#view_opts{sys = #system{interval = Interval}, ps_cmd = HomePsCmd} = ViewO
 sys_ps_cmd(no_ps) ->
     no_ps;
 sys_ps_cmd(_HomePsCmd) ->
-    resolve_ps_cmd(io_lib:format("ps -o pcpu,pmem,rss,vsz ~s", [os:getpid()])).
+    resolve_ps_cmd(io_lib:format("ps -o pcpu,pmem,rss,vsz ~s 2>/dev/null", [os:getpid()])).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Private
