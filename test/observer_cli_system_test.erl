@@ -159,16 +159,16 @@ collect_sys_info_test() ->
     Cmd = "printf 'header\\n 1 2 3 4\\n'",
     {OsProcessInfo, CpuGauge} = observer_cli_system:collect_os_process_info(Cmd, undefined),
     ?assertEqual({"ps -o pcpu", "1%"}, proplists:get_value(ps_cpu, OsProcessInfo)),
-    ?assertEqual("2%", proplists:get_value(ps_mem, OsProcessInfo)),
-    ?assertEqual(3 * 1024, proplists:get_value(ps_rss, OsProcessInfo)),
-    ?assertEqual(4 * 1024, proplists:get_value(ps_vsz, OsProcessInfo)),
+    ?assertEqual({"ps -o pmem", "2%"}, proplists:get_value(ps_mem, OsProcessInfo)),
+    ?assertEqual({"ps -o rss", 3 * 1024}, proplists:get_value(ps_rss, OsProcessInfo)),
+    ?assertEqual({"ps -o vsz", 4 * 1024}, proplists:get_value(ps_vsz, OsProcessInfo)),
     %% ps -o succeeded, so the cpu gauge passes through unchanged.
     ?assertEqual(undefined, CpuGauge),
     {Info, _} = observer_cli_system:collect_sys_info(Cmd, undefined),
     ?assertEqual({"ps -o pcpu", "1%"}, proplists:get_value(ps_cpu, Info)),
-    ?assertEqual("2%", proplists:get_value(ps_mem, Info)),
-    ?assertEqual(3 * 1024, proplists:get_value(ps_rss, Info)),
-    ?assertEqual(4 * 1024, proplists:get_value(ps_vsz, Info)).
+    ?assertEqual({"ps -o pmem", "2%"}, proplists:get_value(ps_mem, Info)),
+    ?assertEqual({"ps -o rss", 3 * 1024}, proplists:get_value(ps_rss, Info)),
+    ?assertEqual({"ps -o vsz", 4 * 1024}, proplists:get_value(ps_vsz, Info)).
 
 collect_os_process_info_proc_status_fallback_test() ->
     NoPs = "printf 'header\\n'",
@@ -176,9 +176,15 @@ collect_os_process_info_proc_status_fallback_test() ->
     ?assertEqual({"cpu rate", "--%"}, proplists:get_value(ps_cpu, OsProcessInfo)),
     case os:type() of
         {unix, linux} ->
-            ?assert(is_integer(proplists:get_value(ps_rss, OsProcessInfo))),
-            ?assert(is_integer(proplists:get_value(ps_vsz, OsProcessInfo))),
-            ?assertNotEqual("--%", proplists:get_value(ps_mem, OsProcessInfo)),
+            ?assertMatch(
+                {"/proc rss", Rss} when is_integer(Rss),
+                proplists:get_value(ps_rss, OsProcessInfo)
+            ),
+            ?assertMatch(
+                {"/proc vsz", Vsz} when is_integer(Vsz),
+                proplists:get_value(ps_vsz, OsProcessInfo)
+            ),
+            ?assertNotEqual({"/proc pmem", "--%"}, proplists:get_value(ps_mem, OsProcessInfo)),
             ?assertNotEqual(undefined, CpuGauge),
             {OsProcessInfo2, CpuGauge2} = observer_cli_system:collect_os_process_info(
                 NoPs, CpuGauge
@@ -190,9 +196,9 @@ collect_os_process_info_proc_status_fallback_test() ->
             {OsProcessInfo3, _} = observer_cli_system:collect_os_process_info(NoPs, AgedGauge),
             ?assertNotEqual({"cpu rate", "--%"}, proplists:get_value(ps_cpu, OsProcessInfo3));
         _ ->
-            ?assertEqual("--", proplists:get_value(ps_rss, OsProcessInfo)),
-            ?assertEqual("--", proplists:get_value(ps_vsz, OsProcessInfo)),
-            ?assertEqual("--%", proplists:get_value(ps_mem, OsProcessInfo))
+            ?assertEqual({"/proc rss", "--"}, proplists:get_value(ps_rss, OsProcessInfo)),
+            ?assertEqual({"/proc vsz", "--"}, proplists:get_value(ps_vsz, OsProcessInfo)),
+            ?assertEqual({"/proc pmem", "--%"}, proplists:get_value(ps_mem, OsProcessInfo))
     end.
 
 collect_os_process_info_busybox_usage_test() ->
@@ -216,13 +222,23 @@ collect_os_process_info_busybox_usage_test() ->
                 [ps_cpu, ps_mem, ps_rss, ps_vsz],
                 lists:sort([Key || {Key, _} <- OsProcessInfo])
             ),
-            ?assertNotEqual("v1.36.1%", proplists:get_value(ps_mem, OsProcessInfo)),
+            ?assertNotEqual(
+                {"/proc pmem", "v1.36.1%"}, proplists:get_value(ps_mem, OsProcessInfo)
+            ),
             case os:type() of
                 {unix, linux} ->
-                    ?assert(is_integer(proplists:get_value(ps_rss, OsProcessInfo))),
-                    ?assert(is_integer(proplists:get_value(ps_vsz, OsProcessInfo)));
+                    ?assertMatch(
+                        {"/proc rss", Rss} when is_integer(Rss),
+                        proplists:get_value(ps_rss, OsProcessInfo)
+                    ),
+                    ?assertMatch(
+                        {"/proc vsz", Vsz} when is_integer(Vsz),
+                        proplists:get_value(ps_vsz, OsProcessInfo)
+                    );
                 _ ->
-                    ?assertEqual("--", proplists:get_value(ps_rss, OsProcessInfo))
+                    ?assertEqual(
+                        {"/proc rss", "--"}, proplists:get_value(ps_rss, OsProcessInfo)
+                    )
             end
         end,
         BusyBoxOutputs
@@ -272,7 +288,7 @@ resolve_ps_cmd_keeps_working_ps_test() ->
             ?assertEqual(1, ps_fork_count(Marker)),
             {Info, _} = observer_cli_system:collect_os_process_info(Working, undefined),
             ?assertEqual({"ps -o pcpu", "1.5%"}, proplists:get_value(ps_cpu, Info)),
-            ?assertEqual(12345 * 1024, proplists:get_value(ps_rss, Info)),
+            ?assertEqual({"ps -o rss", 12345 * 1024}, proplists:get_value(ps_rss, Info)),
             ?assertEqual(2, ps_fork_count(Marker)),
             file:delete(Marker);
         _ ->
@@ -315,9 +331,9 @@ collect_os_process_info_real_ps_test() ->
     RealPs = "printf '%%CPU %%MEM   RSS    VSZ\\n 277  0.2 85184 5726112\\n'",
     {Info, _} = observer_cli_system:collect_os_process_info(RealPs, undefined),
     ?assertEqual({"ps -o pcpu", "277%"}, proplists:get_value(ps_cpu, Info)),
-    ?assertEqual("0.2%", proplists:get_value(ps_mem, Info)),
-    ?assertEqual(85184 * 1024, proplists:get_value(ps_rss, Info)),
-    ?assertEqual(5726112 * 1024, proplists:get_value(ps_vsz, Info)),
+    ?assertEqual({"ps -o pmem", "0.2%"}, proplists:get_value(ps_mem, Info)),
+    ?assertEqual({"ps -o rss", 85184 * 1024}, proplists:get_value(ps_rss, Info)),
+    ?assertEqual({"ps -o vsz", 5726112 * 1024}, proplists:get_value(ps_vsz, Info)),
     ?assertEqual(RealPs, observer_cli_system:resolve_ps_cmd(RealPs)).
 
 collect_os_process_info_no_ps_test() ->
@@ -328,13 +344,19 @@ collect_os_process_info_no_ps_test() ->
     case os:type() of
         {unix, linux} ->
             ?assertNotEqual(undefined, Gauge),
-            ?assertNotEqual("--%", proplists:get_value(ps_mem, Info)),
-            ?assert(is_integer(proplists:get_value(ps_rss, Info))),
-            ?assert(is_integer(proplists:get_value(ps_vsz, Info)));
+            ?assertNotEqual({"/proc pmem", "--%"}, proplists:get_value(ps_mem, Info)),
+            ?assertMatch(
+                {"/proc rss", Rss} when is_integer(Rss),
+                proplists:get_value(ps_rss, Info)
+            ),
+            ?assertMatch(
+                {"/proc vsz", Vsz} when is_integer(Vsz),
+                proplists:get_value(ps_vsz, Info)
+            );
         _ ->
-            ?assertEqual("--%", proplists:get_value(ps_mem, Info)),
-            ?assertEqual("--", proplists:get_value(ps_rss, Info)),
-            ?assertEqual("--", proplists:get_value(ps_vsz, Info))
+            ?assertEqual({"/proc pmem", "--%"}, proplists:get_value(ps_mem, Info)),
+            ?assertEqual({"/proc rss", "--"}, proplists:get_value(ps_rss, Info)),
+            ?assertEqual({"/proc vsz", "--"}, proplists:get_value(ps_vsz, Info))
     end.
 
 render_sys_info_cpu_label_test() ->

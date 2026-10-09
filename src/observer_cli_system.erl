@@ -40,7 +40,11 @@
 
 %% ps -o pcpu is a lifetime average; the /proc fallback is an instantaneous
 %% rate over the refresh interval. Different quantity, so a different label.
+%% pmem/rss/vsz are the same quantity either way, so those only name the source.
 -define(PROC_CPU_LABEL, "cpu rate").
+-define(PROC_MEM_LABEL, "/proc pmem").
+-define(PROC_RSS_LABEL, "/proc rss").
+-define(PROC_VSZ_LABEL, "/proc vsz").
 
 -define(UTIL_ALLOCATORS, [
     binary_alloc,
@@ -641,9 +645,9 @@ collect_os_process_info(Cmd, CpuGauge) ->
         {ok, {CpuV, MemV, RssKb, VszKb}} ->
             OsProcessInfo = [
                 {ps_cpu, {"ps -o pcpu", CpuV ++ "%"}},
-                {ps_mem, MemV ++ "%"},
-                {ps_rss, RssKb * 1024},
-                {ps_vsz, VszKb * 1024}
+                {ps_mem, {"ps -o pmem", MemV ++ "%"}},
+                {ps_rss, {"ps -o rss", RssKb * 1024}},
+                {ps_vsz, {"ps -o vsz", VszKb * 1024}}
             ],
             {OsProcessInfo, CpuGauge};
         error ->
@@ -683,9 +687,9 @@ proc_fallback_os_process_info(CpuGauge) ->
     {NewCpuGauge, CpuPercent} = observer_cli_lib:cpu_percent_gauge(CpuGauge, CurCpuSample),
     OsProcessInfo = [
         {ps_cpu, {?PROC_CPU_LABEL, CpuPercent ++ "%"}},
-        {ps_mem, observer_cli_lib:proc_mem_percent() ++ "%"},
-        {ps_rss, proc_fallback_bytes(RssKb)},
-        {ps_vsz, proc_fallback_bytes(VszKb)}
+        {ps_mem, {?PROC_MEM_LABEL, observer_cli_lib:proc_mem_percent() ++ "%"}},
+        {ps_rss, {?PROC_RSS_LABEL, proc_fallback_bytes(RssKb)}},
+        {ps_vsz, {?PROC_VSZ_LABEL, proc_fallback_bytes(VszKb)}}
     ],
     {OsProcessInfo, NewCpuGauge}.
 
@@ -764,6 +768,11 @@ fill_info([{dynamic, Key} | Rest], Data) when is_atom(Key) ->
         undefined -> [undefined | fill_info(Rest, Data)];
         {Str, Value} -> [{Str, Value} | fill_info(Rest, Data)]
     end;
+fill_info([{dynamic, {Format, Key}} | Rest], Data) when is_atom(Key) ->
+    case proplists:get_value(Key, Data) of
+        undefined -> [undefined | fill_info(Rest, Data)];
+        {Str, Value} -> [{Str, {Format, Value}} | fill_info(Rest, Data)]
+    end;
 fill_info([{Str, Key} | Rest], Data) when is_atom(Key) ->
     case proplists:get_value(Key, Data) of
         undefined -> [undefined | fill_info(Rest, Data)];
@@ -828,9 +837,9 @@ info_fields() ->
         ]},
         {"Statistics", right, [
             {dynamic, ps_cpu},
-            {"ps -o pmem", ps_mem},
-            {"ps -o rss", {bytes, ps_rss}},
-            {"ps -o vsz", {bytes, ps_vsz}},
+            {dynamic, ps_mem},
+            {dynamic, {bytes, ps_rss}},
+            {dynamic, {bytes, ps_vsz}},
             {"Total IOIn", {bytes, io_input}},
             {"Total IOOut", {bytes, io_output}}
         ]}

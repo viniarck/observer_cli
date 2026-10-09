@@ -112,7 +112,8 @@ render_system_line_missing_output_test() ->
     Line = lists:flatten(observer_cli:render_system_line(PsCmd, StableInfo)),
     ?assert(string:find(Line, "cpu rate") =/= nomatch),
     ?assertEqual(nomatch, string:find(Line, "ps -o pcpu")),
-    ?assert(string:find(Line, "ps -o pmem") =/= nomatch).
+    ?assert(string:find(Line, "/proc pmem") =/= nomatch),
+    ?assertEqual(nomatch, string:find(Line, "ps -o pmem")).
 
 render_system_line_proc_fallback_test() ->
     PsCmd = "printf ''",

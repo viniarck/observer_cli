@@ -451,12 +451,12 @@ system_summary(PsCmd, StableInfo, AtomStatus, CpuPercent) ->
     Reductions = erlang:statistics(reductions),
     {PortWarning, ProcWarning, PortCount, ProcCount} =
         get_port_proc_info(PortLimit, ProcLimit),
-    {CpuLabel, CpuPsV, MemPsV} =
+    {CpuLabel, CpuPsV, MemLabel, MemPsV} =
         case ps_cpu_mem(PsCmd) of
             {ok, CpuPsValue, MemPsValue} ->
-                {" ps -o pcpu", CpuPsValue, MemPsValue};
+                {" ps -o pcpu", CpuPsValue, " ps -o pmem", MemPsValue};
             error ->
-                {" cpu rate", CpuPercent, observer_cli_lib:proc_mem_percent()}
+                {" cpu rate", CpuPercent, " /proc pmem", observer_cli_lib:proc_mem_percent()}
         end,
     {Reds, AddReds} = Reductions,
     ReductionsText = [integer_to_list(Reds), "/", integer_to_list(AddReds)],
@@ -494,6 +494,7 @@ system_summary(PsCmd, StableInfo, AtomStatus, CpuPercent) ->
             system_atom_summary_row(
                 AtomStatus,
                 EtsLimit,
+                MemLabel,
                 MemPsV,
                 ReductionsText,
                 {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra,
@@ -505,6 +506,7 @@ system_summary(PsCmd, StableInfo, AtomStatus, CpuPercent) ->
 system_atom_summary_row(
     {ok, AtomLimit, AtomCount},
     _EtsLimit,
+    MemLabel,
     MemPsV,
     ReductionsText,
     {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra, RightLabelExtra,
@@ -514,7 +516,7 @@ system_atom_summary_row(
     {?UNDERLINE, [
         {"Atom Count", 10 + LeftLabelExtra},
         {AtomWarning, Atom, 22 + LeftValueExtra},
-        {" ps -o pmem", 26 + MiddleLabelExtra},
+        {MemLabel, 26 + MiddleLabelExtra},
         {[MemPsV, "%"], 21 + MiddleValueExtra},
         {"Reds(Total/SinceLastCall)", 20 + RightLabelExtra},
         {ReductionsText, 24 + RightValueExtra}
@@ -522,6 +524,7 @@ system_atom_summary_row(
 system_atom_summary_row(
     {error, unsupported},
     EtsLimit,
+    MemLabel,
     MemPsV,
     ReductionsText,
     {LeftLabelExtra, LeftValueExtra, MiddleLabelExtra, MiddleValueExtra, RightLabelExtra,
@@ -530,7 +533,7 @@ system_atom_summary_row(
     {?UNDERLINE, [
         {"Ets Limit", 10 + LeftLabelExtra},
         {EtsLimit, 21 + LeftValueExtra},
-        {" ps -o pmem", 25 + MiddleLabelExtra},
+        {MemLabel, 25 + MiddleLabelExtra},
         {[MemPsV, "%"], 21 + MiddleValueExtra},
         {"Reductions", 20 + RightLabelExtra},
         {ReductionsText, 24 + RightValueExtra}
